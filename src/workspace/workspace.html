@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>chrome-tmux</title>
+  <link rel="icon" href="../../icons/icon32.png">
+  <link rel="stylesheet" href="workspace.css">
+  <script src="../shared/keys.js"></script>
+  <script type="module" src="workspace.js"></script>
+</head>
+<body>
+  <div id="app">
+    <div id="status" role="toolbar" aria-label="tmux status line"></div>
+    <div id="main">
+      <div id="panes"></div>
+      <div id="decor"></div>
+      <div id="overlay"></div>
+    </div>
+  </div>
+  <div id="shield"></div>
+  <div id="keysink" tabindex="-1" aria-hidden="true"></div>
+  <div id="boot">chrome-tmux: starting server…</div>
+</body>
+</html>

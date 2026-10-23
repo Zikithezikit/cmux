@@ -1,0 +1,309 @@
+:root {
+  --font: "JetBrainsMono Nerd Font", "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", Menlo, monospace;
+  --font-size: 13px;
+  --line-h: 20px;
+  --term-bg: #121212;
+  --term-fg: #d0d0d0;
+  --border: #444;
+  --border-active: #3fb950;
+  --mode-bg: #e5e510;
+  --mode-fg: #000;
+  --msg-bg: #e5e510;
+  --msg-fg: #000;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--term-bg);
+  color: var(--term-fg);
+  font: var(--font-size)/var(--line-h) var(--font);
+}
+
+#app {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+}
+#app.status-top #status { order: 0; }
+#app.status-top #main { order: 1; }
+#app.status-bottom #status { order: 1; }
+#app.status-bottom #main { order: 0; }
+
+#main {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+#panes, #decor, #overlay {
+  position: absolute;
+  inset: 0;
+}
+#decor { pointer-events: none; }
+#decor .divider { pointer-events: auto; }
+#overlay { pointer-events: none; z-index: 20; }
+#overlay > * { pointer-events: auto; }
+
+/* ------------------------------------------------------------ status line */
+
+#status {
+  flex: 0 0 var(--line-h);
+  height: var(--line-h);
+  display: flex;
+  align-items: stretch;
+  white-space: pre;
+  overflow: hidden;
+  user-select: none;
+  cursor: default;
+}
+#status.hidden { display: none; }
+#status .seg { display: flex; align-items: stretch; flex: 0 0 auto; overflow: hidden; }
+#status .windows { flex: 0 1 auto; min-width: 0; }
+#status .spacer { flex: 1 1 0; }
+#status .win { display: flex; cursor: pointer; }
+#status .run { display: inline-block; height: var(--line-h); }
+#status .prompt { flex: 1 1 auto; display: flex; align-items: stretch; }
+#status .prompt input {
+  flex: 1 1 auto;
+  border: 0;
+  outline: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  caret-color: currentColor;
+}
+#status .message { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+
+/* Powerline separators drawn with CSS so no patched font is required. */
+.pl {
+  display: inline-block;
+  width: calc(var(--line-h) * 0.5);
+  height: var(--line-h);
+  vertical-align: top;
+  position: relative;
+}
+.pl > i {
+  position: absolute;
+  inset: 0;
+  background: currentColor;
+}
+.pl.r > i { clip-path: polygon(0 0, 100% 50%, 0 100%); }
+.pl.l > i { clip-path: polygon(100% 0, 0 50%, 100% 100%); }
+.pl.rr > i { border-radius: 0 999px 999px 0; }
+.pl.lr > i { border-radius: 999px 0 0 999px; }
+.pl.rt > i { clip-path: polygon(0 0, 12% 0, 100% 50%, 12% 100%, 0 100%, 88% 50%); }
+.pl.lt > i { clip-path: polygon(100% 0, 88% 0, 0 50%, 88% 100%, 100% 100%, 12% 50%); }
+
+@keyframes ctmux-blink { 50% { opacity: 0; } }
+
+/* ------------------------------------------------------------------ panes */
+
+.pane {
+  position: absolute;
+  overflow: hidden;
+  background: var(--term-bg);
+}
+.pane.hidden { visibility: hidden; pointer-events: none; }
+.pane .frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+.pane .pane-title {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: var(--line-h);
+  white-space: pre;
+  overflow: hidden;
+  padding: 0 4px;
+}
+.pane.title-top .pane-title { top: 0; }
+.pane.title-bottom .pane-title { bottom: 0; }
+.pane .body { position: absolute; inset: 0; }
+.pane.title-top .body { top: var(--line-h); }
+.pane.title-bottom .body { bottom: var(--line-h); }
+
+.launcher {
+  position: absolute;
+  inset: 0;
+  padding: 6px 10px;
+  overflow: auto;
+  background: var(--term-bg);
+  color: var(--term-fg);
+}
+.launcher pre { margin: 0; font: inherit; white-space: pre-wrap; opacity: 0.75; }
+.launcher form { display: flex; margin: 0; }
+.launcher .ps1 { color: var(--border-active); white-space: pre; }
+.launcher input {
+  flex: 1 1 auto;
+  border: 0;
+  outline: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  caret-color: var(--term-fg);
+}
+.launcher .recent { margin-top: 1em; opacity: 0.8; }
+.launcher .recent a {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.launcher .recent a:hover, .launcher .recent a:focus { background: var(--mode-bg); color: var(--mode-fg); outline: 0; }
+.launcher .recent .k { opacity: 0.6; }
+
+/* ---------------------------------------------------------------- borders */
+
+.divider { position: absolute; background: var(--border); }
+.divider::before { content: ""; position: absolute; inset: -3px; }
+.divider.h { cursor: col-resize; }
+.divider.v { cursor: row-resize; }
+.edge { position: absolute; background: var(--border-active); pointer-events: none; }
+
+#shield { position: fixed; inset: 0; z-index: 100; display: none; }
+#shield.on { display: block; }
+#keysink { position: fixed; width: 0; height: 0; overflow: hidden; outline: 0; }
+
+#boot {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--term-bg);
+  z-index: 200;
+}
+#boot.done { display: none; }
+
+/* --------------------------------------------------------------- overlays */
+
+.ov-box {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  background: var(--term-bg);
+  color: var(--term-fg);
+  border: 1px solid var(--border-active);
+  min-height: 0;
+}
+.ov-box .ov-head {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  background: var(--border);
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ov-box .ov-filter {
+  flex: 0 0 auto;
+  display: flex;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+}
+.ov-box .ov-filter input {
+  flex: 1;
+  border: 0;
+  outline: 0;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+}
+.ov-box .ov-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  min-height: 0;
+  white-space: pre;
+}
+.ov-box .row { padding: 0 6px; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.ov-box .row.sel { background: var(--mode-bg); color: var(--mode-fg); }
+.ov-box .row .dim { opacity: 0.6; }
+.ov-box .row mark { background: none; color: inherit; text-decoration: underline; font-weight: bold; }
+.ov-box .ov-foot {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  opacity: 0.7;
+  border-top: 1px solid var(--border);
+  white-space: pre;
+  overflow: hidden;
+}
+
+.pane-number {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  font-weight: bold;
+  font-size: min(18vh, 160px);
+  line-height: 1;
+  text-shadow: 0 0 12px rgba(0, 0, 0, 0.8);
+}
+.pane-number span { padding: 0.1em 0.3em; background: rgba(0, 0, 0, 0.55); border-radius: 8px; }
+.pane-number small { display: block; font-size: 0.15em; text-align: center; }
+
+.clock {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  background: var(--term-bg);
+}
+.clock .digits { display: flex; gap: 2vmin; }
+.clock .digit { display: grid; grid-template-columns: repeat(5, 1fr); grid-auto-rows: 1fr; gap: 0.4vmin; }
+.clock .digit b { width: 2.2vmin; height: 2.6vmin; }
+.clock .ampm { align-self: end; font-size: 3vmin; }
+
+.detached {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  text-align: center;
+  background: var(--term-bg);
+  white-space: pre;
+}
+
+/* Debug panel */
+.debug .ov-body { white-space: normal; padding: 6px 10px; }
+.debug .tabs { display: flex; gap: 1ch; padding: 0 6px; border-bottom: 1px solid var(--border); }
+.debug .tabs button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0 0.5ch;
+  cursor: pointer;
+  opacity: 0.7;
+}
+.debug .tabs button.on { opacity: 1; background: var(--mode-bg); color: var(--mode-fg); }
+.debug h3 { font-size: inherit; margin: 1em 0 0.25em; color: var(--border-active); }
+.debug table { border-collapse: collapse; width: 100%; }
+.debug td, .debug th { text-align: left; vertical-align: top; padding: 1px 1ch 1px 0; border-bottom: 1px solid var(--border); }
+.debug .lvl-error { color: #f14c4c; }
+.debug .lvl-warn { color: #e5e510; }
+.debug .lvl-info { opacity: 0.75; }
+.debug code { white-space: pre-wrap; }
+.debug a { color: var(--border-active); }
+.debug .badge { padding: 0 0.6ch; border-radius: 3px; background: var(--border); }
+.debug .badge.emulated { background: #0dbc79; color: #000; }
+.debug .badge.unknown { background: #cd3131; color: #fff; }
+.debug button.act {
+  font: inherit;
+  color: var(--mode-fg);
+  background: var(--mode-bg);
+  border: 0;
+  padding: 0 1ch;
+  cursor: pointer;
+}

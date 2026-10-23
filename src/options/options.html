@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>chrome-tmux options</title>
+  <link rel="icon" href="../../icons/icon32.png">
+  <link rel="stylesheet" href="options.css">
+  <script src="../shared/keys.js"></script>
+  <script type="module" src="options.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>chrome-tmux</h1>
+      <button id="open" class="primary">Open workspace</button>
+    </header>
+
+    <section>
+      <h2>1. Load your <code>~/.tmux.conf</code></h2>
+      <p class="hint">Browsers can't read your home directory on their own. Pick one of these:</p>
+
+      <div class="card">
+        <h3>Read it from disk <span class="tag">recommended</span></h3>
+        <p>Re-read on every workspace start and on <code>source-file ~/.tmux.conf</code>, so edits apply like in real tmux.
+          Needs <b>Allow access to file URLs</b> on this extension's
+          <a id="ext-details" href="#">details page</a>.
+          File access: <b id="file-access">checking…</b></p>
+        <form id="path-form" class="row">
+          <input id="path" type="text" spellcheck="false" placeholder="/home/you/.tmux.conf">
+          <button type="submit">Load</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h3>Upload a copy</h3>
+        <p>In the file dialog press <kbd>Ctrl</kbd>+<kbd>H</kbd> to show hidden files.</p>
+        <input id="file" type="file">
+      </div>
+
+      <div class="card">
+        <h3>Edit / paste</h3>
+        <textarea id="text" spellcheck="false" rows="16" placeholder="set -g prefix C-a&#10;bind | split-window -h&#10;set -g @plugin 'tmux-plugins/tmux-sensible'"></textarea>
+        <div class="row">
+          <button id="save-text">Save text</button>
+          <span id="source-label" class="hint"></span>
+        </div>
+      </div>
+      <p id="status" role="status"></p>
+    </section>
+
+    <section>
+      <h2>2. Check it</h2>
+      <div id="report" class="card"></div>
+    </section>
+
+    <section>
+      <h2>3. Make it feel like a terminal</h2>
+      <div class="card">
+        <p>Run the workspace as a chromeless app window (no tab strip or address bar):</p>
+        <pre id="app-cmd"></pre>
+        <p class="hint">Or press <kbd>F11</kbd> for fullscreen. Chrome reserves some shortcuts
+          (<kbd>Ctrl</kbd>+<kbd>T</kbd>/<kbd>W</kbd>/<kbd>N</kbd>/<kbd>Tab</kbd>) so they can't be used as tmux keys;
+          in app mode fewer keys are reserved. <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> opens the workspace.</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Saved state</h2>
+      <div class="card row">
+        <button id="clear-resurrect">Delete resurrect snapshot</button>
+        <button id="clear-history">Clear URL history</button>
+        <span id="state-info" class="hint"></span>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
