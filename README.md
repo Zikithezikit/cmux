@@ -5,14 +5,10 @@ tmux inside Chrome. A Manifest V3 extension that turns a tab (or a chromeless
 sessions, a status line, copy mode and modal key bindings. It is configured by
 your real `~/.tmux.conf`, including TPM plugins.
 
-```
- 0  1 github*  2 docs-                                   Clear 26°C TLV
-┌─────────────────────────────┬──────────────────────────────────────┐
-│ https://github.com/...      │ https://developer.chrome.com/...     │
-│                             ├──────────────────────────────────────┤
-│                             │ ❯ news.ycombinator.com               │
-└─────────────────────────────┴──────────────────────────────────────┘
-```
+![chrome-tmux running a real ~/.tmux.conf: Dracula status line on top, Wikipedia, Hacker News and GitHub in three panes](docs/screenshots/workspace.png)
+
+*A real `~/.tmux.conf` (prefix `C-s`, Dracula theme, status line on top) driving three
+panes. Window list on the left, the Dracula weather widget on the right.*
 
 ## Install
 
@@ -21,6 +17,12 @@ your real `~/.tmux.conf`, including TPM plugins.
    For the path option, enable **Allow access to file URLs** on the extension's details page
    and enter an absolute path such as `/home/you/.tmux.conf`. The file is then re-read on every
    start and on `source-file ~/.tmux.conf`, like real tmux.
+
+   <details><summary>Options page: the config is parsed and checked before you use it</summary>
+
+   ![Options page with a loaded tmux.conf and its parse report](docs/screenshots/options.png)
+   </details>
+
 3. Click the toolbar icon (or press <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd>) to open the workspace.
    For a terminal-like window with no tab strip or address bar:
 
@@ -52,6 +54,23 @@ Extra default bindings, for things a browser needs: `prefix g` opens a URL in th
 
 State lives in `chrome.storage.session`, like a tmux server: it survives reloading
 the workspace but not restarting Chrome. Use resurrect/continuum to persist across restarts.
+
+### A quick tour
+
+<table>
+<tr>
+<td width="50%"><a href="docs/screenshots/sessions.png"><img src="docs/screenshots/sessions.png" alt="Session manager"></a><br>
+<b>Session manager</b> (<code>prefix s</code>): switch, create (<code>n</code>), rename (<code>$</code>), kill (<code>x</code>).</td>
+<td width="50%"><a href="docs/screenshots/copy-mode.png"><img src="docs/screenshots/copy-mode.png" alt="Copy mode"></a><br>
+<b>Copy mode</b> (<code>prefix [</code>): vi keys, <code>/</code> search and a selection in a live page; <code>Enter</code> copies it.</td>
+</tr>
+<tr>
+<td><a href="docs/screenshots/fzf-url.png"><img src="docs/screenshots/fzf-url.png" alt="fzf-url link picker"></a><br>
+<b>tmux-fzf-url</b> (<code>prefix u</code>): every link on the page in a fuzzy picker.</td>
+<td><a href="docs/screenshots/plugins.png"><img src="docs/screenshots/plugins.png" alt="TPM plugins in the debug panel"></a><br>
+<b>TPM emulation</b> (<code>prefix ~</code>): which plugins are emulated, their options, GitHub metadata.</td>
+</tr>
+</table>
 
 ## TPM plugins
 
@@ -135,6 +154,7 @@ windows or layouts doesn't reload pages.
 | `make test` / `make e2e` / `make lint` | Each of those on its own |
 | `make package` | Builds `dist/chrome-tmux-<version>.zip` |
 | `make info` | Prints the extension ID, workspace URL and the browsers found |
+| `make screenshots` | Regenerates the README images in `docs/screenshots/` (needs network: it loads real sites) |
 
 The extension ID of an unpacked extension is derived from its folder path, so the
 Makefile computes the workspace URL itself. Override the browsers with

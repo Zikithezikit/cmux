@@ -26,10 +26,10 @@ ESLINT      := npx -y eslint@8.57.0 --no-eslintrc --env browser,es2022,node \
                --parser-options=ecmaVersion:2022,sourceType:module --global chrome \
                --rule 'no-unused-vars:[error,{args:none}]' --rule 'no-undef:error' --ext .js,.mjs
 
-.PHONY: help install test e2e lint check icons package run app info clean distclean
+.PHONY: help install test e2e lint check icons package screenshots run app info clean distclean
 
 help: ## Show this help
-	@awk 'BEGIN {FS = ":.*## "} /^[a-z0-9-]+:.*## / {printf "  \033[32mmake %-10s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*## "} /^[a-z0-9-]+:.*## / {printf "  \033[32mmake %-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo
 	@echo "  Extension ID: $(EXT_ID)  (for an unpacked load of $(ROOT))"
 
@@ -55,6 +55,9 @@ icons: ## Regenerate icons/*.png
 
 package: ## Build dist/chrome-tmux-<version>.zip
 	npm run -s package
+
+screenshots: node_modules ## Regenerate docs/screenshots/*.png for the README (loads real sites)
+	CHROME_PATH="$(CHROMIUM)" node tools/screenshots.mjs
 
 run: ## Launch Chromium with the extension loaded and the workspace open (dev profile)
 	@test -n "$(CHROMIUM)" || { echo "No Chromium found; set CHROMIUM=/path/to/chromium"; exit 1; }

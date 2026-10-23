@@ -86,7 +86,9 @@ class Workspace {
     const { text, label, error } = await loadMainConfig();
     this.configMeta = { label, error, lines: text ? text.split('\n').length : 0 };
     if (error) this.t.notice(error, { level: 'warn', source: label });
-    if (text) await this.t.runConfig(text, { source: label.split(' ')[0] || '(config)' });
+    // Notices point at "<path>:<line>"; uploaded or pasted text stands in for ~/.tmux.conf.
+    const source = label.startsWith('/') ? label.split(' ')[0] : '~/.tmux.conf';
+    if (text) await this.t.runConfig(text, { source });
     this.tpm.finish();
   }
 
