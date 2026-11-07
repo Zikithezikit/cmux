@@ -8,13 +8,13 @@ export default {
   description: 'C-h/C-j/C-k/C-l/C-\\ move between panes without the prefix (also in copy mode).',
   optionPrefixes: ['@vim_navigator'],
   apply(t, api) {
-    const maps: [string, string, string][] = [
+    const maps = [
       ['@vim_navigator_mapping_left', 'C-h', 'select-pane -L'],
       ['@vim_navigator_mapping_down', 'C-j', 'select-pane -D'],
       ['@vim_navigator_mapping_up', 'C-k', 'select-pane -U'],
       ['@vim_navigator_mapping_right', 'C-l', 'select-pane -R'],
       ['@vim_navigator_mapping_prev', 'C-\\', 'select-pane -l'],
-    ];
+    ] as const;
     for (const [opt, def, cmd] of maps) {
       for (const key of api.option(opt, def).split(/\s+/).filter(Boolean)) {
         api.bind('root', key, cmd, { note: `vim-tmux-navigator: ${cmd}` });

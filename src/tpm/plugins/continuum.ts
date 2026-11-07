@@ -9,7 +9,7 @@ export default {
   description: 'Automatic resurrect save every @continuum-save-interval minutes; @continuum-restore on restores at start.',
   optionPrefixes: ['@continuum'],
   apply(t, api) {
-    if (!t.plugins!.declared.has('tmux-plugins/tmux-resurrect')) {
+    if (!api.tpm.declared.has('tmux-plugins/tmux-resurrect')) {
       api.notice('requires tmux-plugins/tmux-resurrect; saving with the built-in resurrect logic anyway', 'warn');
     }
     const minutes = Number(api.option('@continuum-save-interval', '15'));

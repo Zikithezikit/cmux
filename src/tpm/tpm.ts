@@ -10,17 +10,25 @@ import { toCommandList } from '../core/parser.js';
 import { registerCommand } from '../core/commands.js';
 import { EMULATORS } from './plugins/index.js';
 import type { CommandContext, Flags, KeyValueStorage, LogLevel } from '../core/types.js';
-import type { Tmux, FormatVarFn, ShellVarFn, NoticeOptions, BindOptions, PasteBuffer } from '../core/tmux.js';
-import type { Server, Snapshot } from '../core/server.js';
+import type { Tmux, FormatVarFn, ShellVarFn, BindOptions } from '../core/tmux.js';
 
-export type IntervalHandle = ReturnType<typeof setInterval>;
+/** Opaque handle from `TpmTimers.setInterval`; only ever passed back to `clearInterval`. */
+export type IntervalHandle = unknown;
 
+/** The timer functions TPM uses (injectable so tests and the options page can stub them). */
 export interface TpmTimers {
   setInterval(fn: () => unknown, ms: number): IntervalHandle;
   clearInterval(handle: IntervalHandle): void;
 }
 
-export type TpmFetch = (input: string, init?: RequestInit) => Promise<Response>;
+/** The parts of a fetch `Response` TPM and the plugin emulators read. */
+export interface TpmResponse {
+  readonly ok: boolean;
+  readonly status: number;
+  json(): Promise<unknown>;
+}
+
+export type TpmFetch = (input: string, init?: RequestInit) => Promise<TpmResponse>;
 
 export interface TpmOptions {
   storage?: KeyValueStorage;
@@ -78,23 +86,12 @@ export interface StartupContext {
 
 export type StartupHook = (ctx: StartupContext) => unknown;
 
-export type { FormatVarFn, ShellVarFn, NoticeOptions, BindOptions, PasteBuffer };
-
-/** Layout/URL snapshot saved by the tmux-resurrect emulation (`server.snapshot()`). */
-export type ResurrectSnapshot = Snapshot;
-
-/** The server, as TPM and the plugin emulators see it. */
-export type TpmServer = Server;
-
-/** The tmux engine, as TPM and the plugin emulators see it. */
-export type TpmHost = Tmux;
-
 /** A command registered by a plugin emulator. */
 export interface PluginCommand {
   name: string;
   flags: string;
   alias?: string | string[];
-  run(t: TpmHost, flags: Flags, args: string[], ctx: CommandContext): unknown;
+  run(t: Tmux, flags: Flags, args: string[], ctx: CommandContext): unknown;
 }
 
 /** The API object TPM passes to each emulator's `apply`. */
@@ -113,19 +110,56 @@ export interface PluginApi {
   fetch: TpmFetch;
   notice(msg: string, level?: LogLevel): void;
   refresh: () => void;
+  /** The plugin manager applying the emulator. */
+  tpm: Tpm;
 }
 
-/** A built-in JS emulator of a TPM plugin (the default export of each plugins/*.js). */
+/** A built-in JS emulator of a TPM plugin (the default export of each plugins/*.ts). */
 export interface PluginEmulator {
   repo: string;
-  aliases?: string[];
+  aliases?: readonly string[];
   description: string;
-  optionPrefixes: string[];
-  apply(t: TpmHost, api: PluginApi): void;
+  optionPrefixes: readonly string[];
+  apply(t: Tmux, api: PluginApi): void;
 }
 
 const META_KEY = 'ctmux:tpm:meta';
 const META_TTL = 24 * 3600 * 1000;
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null;
+}
+
+/** `err.message`, or the stringified value when there is none. */
+function errorMessage(err: unknown): string {
+  const msg = isRecord(err) && typeof err.message === 'string' ? err.message : '';
+  return msg || String(err);
+}
+
+function optString(v: unknown): string | undefined {
+  return typeof v === 'string' ? v : undefined;
+}
+
+/** The fields of a GitHub `GET /repos/{owner}/{repo}` response kept in the cache. */
+function parseRepoMeta(j: unknown): PluginMeta {
+  if (!isRecord(j)) throw new TypeError('unexpected GitHub API response');
+  const license = isRecord(j.license) ? j.license.spdx_id : undefined;
+  return {
+    fullName: optString(j.full_name),
+    description: j.description === null ? null : optString(j.description),
+    stars: typeof j.stargazers_count === 'number' ? j.stargazers_count : undefined,
+    defaultBranch: optString(j.default_branch),
+    url: optString(j.html_url),
+    pushedAt: optString(j.pushed_at),
+    license: optString(license) || null,
+    archived: !!j.archived,
+    fetchedAt: Date.now(),
+  };
+}
+
+function findEmulator(key: string): PluginEmulator | undefined {
+  return EMULATORS.find((e) => e.repo.toLowerCase() === key || (e.aliases || []).some((a) => a.toLowerCase() === key));
+}
 
 /** Normalise a plugin spec ('owner/repo', GitHub URL, git@ URL, optional #branch). */
 export function parsePluginSpec(spec: string): PluginSpec | null {
@@ -148,26 +182,28 @@ export function parsePluginSpec(spec: string): PluginSpec | null {
 }
 
 export class Tpm {
-  declare t: TpmHost;
-  declare storage: KeyValueStorage;
-  declare fetch: TpmFetch;
-  declare timers: TpmTimers;
-  declare declared: Map<string, DeclaredPlugin>;
-  declare applied: Map<string, PluginEmulator>;
+  declare readonly t: Tmux;
+  declare readonly storage: KeyValueStorage;
+  declare readonly fetch: TpmFetch;
+  declare readonly timers: TpmTimers;
+  declare readonly declared: Map<string, DeclaredPlugin>;
+  declare readonly applied: Map<string, PluginEmulator>;
   declare ranTpm: boolean;
   declare intervals: IntervalHandle[];
   declare meta: Record<string, PluginMeta>;
   declare startupHooks: StartupHook[];
 
-  constructor(t: TpmHost, { storage, fetchImpl, timers }: TpmOptions = {}) {
+  constructor(t: Tmux, { storage, fetchImpl, timers }: TpmOptions = {}) {
     this.t = t;
     this.storage = storage || memoryStorage();
     this.fetch = fetchImpl || ((...args) => fetch(...args));
     // Wrapped: browsers throw "Illegal invocation" if these are called with another `this`.
-    this.timers = timers || {
-      setInterval: (fn, ms) => setInterval(fn, ms),
-      clearInterval: (h) => clearInterval(h),
+    // The handles clearInterval gets are always ones this setInterval returned.
+    const nativeTimers = {
+      setInterval: (fn: () => unknown, ms: number) => setInterval(fn, ms),
+      clearInterval: (h: ReturnType<typeof setInterval>) => clearInterval(h),
     };
+    this.timers = timers || nativeTimers;
     this.declared = new Map();
     this.applied = new Map();
     this.ranTpm = false;
@@ -177,7 +213,7 @@ export class Tpm {
     t.plugins = this;
   }
 
-  declare(value: string, ctx: CommandContext = {}, legacyList = false) {
+  declare(value: string, ctx: CommandContext = {}, legacyList = false): void {
     const specs = legacyList ? String(value).split(/\s+/).filter(Boolean) : [value];
     for (const spec of specs) {
       const p = parsePluginSpec(spec);
@@ -187,29 +223,33 @@ export class Tpm {
     }
   }
 
-  isActive(repo: string) { return this.applied.has(repo.toLowerCase()); }
+  isActive(repo: string): boolean { return this.applied.has(repo.toLowerCase()); }
 
-  /** run-shell interception. Returns true when handled. */
-  async handleRun(cmd: string, _ctx?: CommandContext) {
+  /**
+   * run-shell interception. Returns true when handled. run-shell passes its
+   * command context, which the intercepted scripts don't need.
+   */
+  handleRun(cmd: string, ctx?: CommandContext): Promise<boolean>;
+  async handleRun(cmd: string): Promise<boolean> {
     const c = cmd.trim().replace(/^['"]|['"]$/g, '');
-    if (/(^|\/)tpm(\/tpm)?\s*$/.test(c) || /plugins\/tpm\/tpm/.test(c)) {
+    if (/(^|\/)tpm(\/tpm)?\s*$/.test(c) || c.includes('plugins/tpm/tpm')) {
       this.ranTpm = true;
       this.initialize();
       return true;
     }
-    if (/resurrect\/scripts\/save\.sh/.test(c)) { await this.t.runString('resurrect-save'); return true; }
-    if (/resurrect\/scripts\/restore\.sh/.test(c)) { await this.t.runString('resurrect-restore'); return true; }
+    if (c.includes('resurrect/scripts/save.sh')) { await this.t.runString('resurrect-save'); return true; }
+    if (c.includes('resurrect/scripts/restore.sh')) { await this.t.runString('resurrect-restore'); return true; }
     return false;
   }
 
   /** Apply all declared plugins (TPM's `run tpm`). Safe to call again on re-source. */
-  initialize() {
+  initialize(): void {
     this.intervals.forEach((h) => this.timers.clearInterval(h));
     this.intervals = [];
     this.applied.clear();
     this.startupHooks = [];
     for (const [key, p] of this.declared) {
-      const emu = EMULATORS.find((e) => e.repo.toLowerCase() === key || (e.aliases || []).some((a) => a.toLowerCase() === key));
+      const emu = findEmulator(key);
       if (!emu) {
         const opts = this.unclaimedOptions().filter((o) => this.guessOwner(o, p));
         this.t.notice(
@@ -222,14 +262,14 @@ export class Tpm {
         emu.apply(this.t, this.api(emu));
         this.applied.set(key, emu);
       } catch (err) {
-        this.t.notice(`plugin ${p.repo} failed: ${(err as Error).message || err}`, { source: p.source, line: p.line, level: 'error' });
+        this.t.notice(`plugin ${p.repo} failed: ${errorMessage(err)}`, { source: p.source, line: p.line, level: 'error' });
       }
     }
-    this.t.ui.keysChanged?.();
+    this.t.ui.keysChanged();
   }
 
   /** Called after the main config was sourced. */
-  finish() {
+  finish(): void {
     if (!this.declared.size || this.ranTpm) return;
     this.t.notice("plugins declared but no `run '~/.tmux/plugins/tpm/tpm'` line; applying them anyway", { level: 'info' });
     this.initialize();
@@ -263,35 +303,37 @@ export class Tpm {
       fetch: this.fetch,
       notice: (msg, level = 'info') => t.notice(`${emu.repo}: ${msg}`, { level, key: `${emu.repo}:${msg}` }),
       refresh: () => t.server.changed('plugin'),
+      tpm: this,
     };
   }
 
-  async runStartup(ctx: StartupContext) {
+  async runStartup(ctx: StartupContext): Promise<void> {
     for (const fn of this.startupHooks) {
-      try { await fn(ctx); } catch (err) { this.t.log(`startup hook failed: ${(err as Error).message || err}`, 'error'); }
+      try { await fn(ctx); } catch (err) { this.t.log(`startup hook failed: ${errorMessage(err)}`, 'error'); }
     }
   }
 
   /** @options not claimed by any applied emulator (nor chrome-tmux itself). */
-  unclaimedOptions() {
-    const claimed = [...this.applied.values()].flatMap((e) => e.optionPrefixes || []);
+  unclaimedOptions(): string[] {
+    const claimed = [...this.applied.values()].flatMap((e) => e.optionPrefixes);
     return Object.keys(this.t.options).filter((o) =>
-      o[0] === '@' && o !== '@plugin' && o !== '@tpm_plugins' && !o.startsWith('@ctmux-') &&
+      o.startsWith('@') && o !== '@plugin' && o !== '@tpm_plugins' && !o.startsWith('@ctmux-') &&
       !claimed.some((p) => o.startsWith(p)));
   }
 
-  guessOwner(option: string, plugin: PluginSpec) {
+  guessOwner(option: string, plugin: PluginSpec): boolean {
     const o = option.slice(1).toLowerCase();
     const name = plugin.name.toLowerCase().replace(/^tmux-/, '').replace(/[-_.]?tmux$/, '');
     const owner = (plugin.owner || '').toLowerCase();
-    return (name && o.startsWith(name)) || (owner && o.startsWith(owner));
+    return (!!name && o.startsWith(name)) || (!!owner && o.startsWith(owner));
   }
 
   /** Plugin rows for the debug panel. */
   report(): PluginReportRow[] {
     return [...this.declared.entries()].map(([key, p]) => {
       const emu = this.applied.get(key);
-      const known = EMULATORS.find((e) => e.repo.toLowerCase() === key || (e.aliases || []).some((a) => a.toLowerCase() === key));
+      const known = findEmulator(key);
+      const def = emu || known;
       return {
         repo: p.repo,
         spec: p.spec,
@@ -299,15 +341,15 @@ export class Tpm {
         source: p.source,
         line: p.line,
         status: emu ? 'emulated' : known ? 'not applied' : 'unknown',
-        description: (emu || known)?.description || '',
+        description: def?.description || '',
         options: Object.keys(this.t.options).filter((o) =>
-          (emu || known) ? (emu || known)!.optionPrefixes?.some((pre) => o.startsWith(pre)) : this.guessOwner(o, p)),
+          def ? def.optionPrefixes.some((pre) => o.startsWith(pre)) : this.guessOwner(o, p)),
         meta: this.meta[p.repo.toLowerCase()] || null,
       };
     });
   }
 
-  async loadMetaCache() {
+  async loadMetaCache(): Promise<Record<string, PluginMeta>> {
     try {
       this.meta = (await this.storage.get<Record<string, PluginMeta>>(META_KEY)) || {};
     } catch { this.meta = {}; }
@@ -315,7 +357,7 @@ export class Tpm {
   }
 
   /** Fetch repository metadata from the GitHub API (cached for a day unless forced). */
-  async fetchMetadata({ force = false } = {}) {
+  async fetchMetadata({ force = false }: { force?: boolean } = {}): Promise<PluginMeta[]> {
     await this.loadMetaCache();
     const results: PluginMeta[] = [];
     for (const p of this.declared.values()) {
@@ -334,23 +376,18 @@ export class Tpm {
         if (!res.ok) {
           this.meta[key] = { error: `HTTP ${res.status}`, fetchedAt: Date.now() };
         } else {
-          const j = await res.json();
-          this.meta[key] = {
-            fullName: j.full_name, description: j.description, stars: j.stargazers_count,
-            defaultBranch: j.default_branch, url: j.html_url, pushedAt: j.pushed_at,
-            license: j.license?.spdx_id || null, archived: !!j.archived, fetchedAt: Date.now(),
-          };
+          this.meta[key] = parseRepoMeta(await res.json());
         }
         results.push(this.meta[key]);
       } catch (err) {
-        this.meta[key] = { error: String((err as Error).message || err), fetchedAt: Date.now() };
+        this.meta[key] = { error: errorMessage(err), fetchedAt: Date.now() };
       }
     }
     await this.storage.set(META_KEY, this.meta);
     return results;
   }
 
-  async clearMetadata() {
+  async clearMetadata(): Promise<void> {
     this.meta = {};
     await this.storage.set(META_KEY, {});
   }

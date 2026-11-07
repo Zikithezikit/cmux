@@ -9,7 +9,7 @@ export default {
   optionPrefixes: ['@pane_resize', '@disable_deprecated_nav_bindings'],
   apply(t, api) {
     const step = api.option('@pane_resize', '5');
-    const nav: Record<string, string> = { h: 'L', j: 'D', k: 'U', l: 'R' };
+    const nav = { h: 'L', j: 'D', k: 'U', l: 'R' } as const;
     for (const [key, dir] of Object.entries(nav)) {
       api.bind('prefix', key, `select-pane -${dir}`, { note: `pain-control: select pane ${dir}` });
       api.bind('prefix', `C-${key}`, `select-pane -${dir}`, { note: `pain-control: select pane ${dir}` });

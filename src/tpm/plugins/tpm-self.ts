@@ -8,12 +8,12 @@ export default {
   description: 'Plugin manager. Install/update fetch GitHub metadata; plugins themselves are built-in JS emulators.',
   optionPrefixes: ['@tpm'],
   apply(t, api) {
-    const tpm = t.plugins!;
+    const tpm = api.tpm;
     api.command({
       name: 'tpm-install', flags: '', async run(tt) {
         tt.ui.message('TPM: fetching plugin metadata from GitHub...');
         await tpm.fetchMetadata();
-        tt.ui.showMessages?.('plugins');
+        tt.ui.showMessages('plugins');
         tt.ui.message('TMUX environment reloaded. Plugins are emulated in JS — see the debug panel.');
       },
     });
@@ -21,7 +21,7 @@ export default {
       name: 'tpm-update', flags: '', async run(tt) {
         tt.ui.message('TPM: refreshing plugin metadata...');
         await tpm.fetchMetadata({ force: true });
-        tt.ui.showMessages?.('plugins');
+        tt.ui.showMessages('plugins');
       },
     });
     api.command({

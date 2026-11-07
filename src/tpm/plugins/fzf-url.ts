@@ -9,9 +9,9 @@ interface CollectedLink {
   text?: string;
 }
 
-interface PickChoice {
-  value: string;
-  key?: string;
+function isCollectedLink(v: unknown): v is CollectedLink {
+  if (typeof v !== 'object' || v === null || !('url' in v) || typeof v.url !== 'string') return false;
+  return !('text' in v) || v.text === undefined || typeof v.text === 'string';
 }
 
 export default {
@@ -22,19 +22,20 @@ export default {
     api.command({
       name: 'fzf-url', flags: 't:', async run(tt) {
         const pane = tt.server.pane;
-        if (!pane || pane.kind !== 'web') { tt.ui.message('No URLs found'); return; }
+        if (pane?.kind !== 'web') { tt.ui.message('No URLs found'); return; }
         const limit = Number(api.option('@fzf-url-history-limit', '2000')) || 2000;
-        const links = ((await tt.ui.paneCommand?.(pane.id, { type: 'collect-links', limit })) as CollectedLink[] | undefined) || [];
+        const reply = await tt.ui.paneCommand(pane.id, { type: 'collect-links', limit });
+        const links = Array.isArray(reply) ? reply.filter(isCollectedLink) : [];
         if (!links.length) { tt.ui.message('No URLs found'); return; }
         const choice = await tt.ui.pick({
           title: 'fzf-url', fuzzy: true,
           hint: 'Enter: new window · C-v: split right · C-s: split below · C-t: Chrome tab',
           items: links.map((l) => ({ label: l.text && l.text !== l.url ? `${l.url}  ${l.text}` : l.url, value: l.url })),
-        }) as PickChoice | string | null;
+        });
         if (!choice) return;
         const url = typeof choice === 'object' ? choice.value : choice;
         const how = (typeof choice === 'object' && choice.key) || api.option('@fzf-url-open', 'window');
-        if (how === 'C-t' || /tab|chrome|xdg-open|open/.test(how)) tt.ui.openTab?.(url);
+        if (how === 'C-t' || /tab|chrome|xdg-open|open/.test(how)) tt.ui.openTab(url);
         else if (how === 'C-v') await tt.runString(`split-window -h '${url.replace(/'/g, '%27')}'`);
         else if (how === 'C-s') await tt.runString(`split-window -v '${url.replace(/'/g, '%27')}'`);
         else await tt.runString(`new-window '${url.replace(/'/g, '%27')}'`);

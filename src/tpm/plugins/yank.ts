@@ -21,10 +21,10 @@ export default {
     api.command({
       name: 'yank-pane', flags: 'mt:', run(tt, f) {
         const p = tt.server.pane;
-        if (!p || p.kind !== 'web') { tt.ui.message('Nothing to yank'); return; }
+        if (p?.kind !== 'web') { tt.ui.message('Nothing to yank'); return; }
         const text = f.m ? `[${p.title || p.url}](${p.url})` : p.url;
         tt.buffers.unshift({ name: `buffer${String(tt.buffers.length).padStart(4, '0')}`, data: text, time: Date.now() });
-        tt.ui.writeClipboard?.(text);
+        void tt.ui.writeClipboard(text);
         tt.ui.message(`Copied: ${text.length > 60 ? text.slice(0, 57) + '...' : text}`);
       },
     });
