@@ -2,7 +2,9 @@
 // (layouts, split ratios, URLs) to chrome.storage.local; prefix + C-r restores.
 
 import type { KeyValueStorage } from '../../core/types.js';
-import type { PluginEmulator, ResurrectSnapshot, TpmHost } from '../tpm.js';
+import type { Snapshot } from '../../core/server.js';
+import type { Tmux } from '../../core/tmux.js';
+import type { PluginEmulator } from '../tpm.js';
 
 export const LAST_KEY = 'ctmux:resurrect:last';
 export const HISTORY_KEY = 'ctmux:resurrect:history';
@@ -17,7 +19,7 @@ interface HistoryEntry {
   sessions: number;
 }
 
-export async function saveSnapshot(t: TpmHost, storage: KeyValueStorage, { quiet = false }: SnapshotOptions = {}) {
+export async function saveSnapshot(t: Tmux, storage: KeyValueStorage, { quiet = false }: SnapshotOptions = {}): Promise<Snapshot> {
   const snap = t.server.snapshot();
   await storage.set(LAST_KEY, snap);
   const history = (await storage.get<HistoryEntry[]>(HISTORY_KEY)) || [];
@@ -27,12 +29,12 @@ export async function saveSnapshot(t: TpmHost, storage: KeyValueStorage, { quiet
   return snap;
 }
 
-export async function restoreSnapshot(t: TpmHost, storage: KeyValueStorage, { quiet = false }: SnapshotOptions = {}) {
-  const snap = await storage.get<ResurrectSnapshot>(LAST_KEY);
+export async function restoreSnapshot(t: Tmux, storage: KeyValueStorage, { quiet = false }: SnapshotOptions = {}): Promise<number> {
+  const snap = await storage.get<Snapshot>(LAST_KEY);
   if (!snap) { if (!quiet) t.ui.message('Tmux resurrect file not found!'); return 0; }
   const n = t.server.restore(snap);
   t.server.changed('restore');
-  (t.ui.focusPane as (paneId?: number) => void)?.();
+  t.ui.focusPane();
   if (!quiet) t.ui.message(n ? `Tmux restore complete! (${n} session${n === 1 ? '' : 's'})` : 'Nothing to restore: all saved sessions already exist');
   return n;
 }
@@ -51,7 +53,7 @@ export default {
       api.bind('prefix', key, 'resurrect-restore', { note: 'resurrect: restore environment' });
     }
     const ignored = ['@resurrect-processes', '@resurrect-strategy-vim', '@resurrect-strategy-nvim',
-      '@resurrect-capture-pane-contents', '@resurrect-dir', '@resurrect-hook-post-save-all'];
+      '@resurrect-capture-pane-contents', '@resurrect-dir', '@resurrect-hook-post-save-all'] as const;
     for (const o of ignored) if (t.options[o] != null) api.notice(`${o} has no meaning for web panes (URLs are always restored)`);
   },
 } satisfies PluginEmulator;

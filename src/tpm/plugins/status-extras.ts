@@ -3,15 +3,22 @@
 import type { PluginEmulator } from '../tpm.js';
 
 /** Battery Status API (not in lib.dom). */
-interface BatteryManager extends EventTarget {
+export interface BatteryManager extends EventTarget {
   level: number;
   charging: boolean;
   dischargingTime: number;
 }
 
-type BrowserNavigator = Navigator & {
+/** `navigator` with the non-standard APIs the status plugins read. */
+export type BrowserNavigator = Navigator & {
+  connection?: { effectiveType?: string };
   getBattery?(): Promise<BatteryManager>;
 };
+
+/** The global `navigator`, or undefined where there is none (e.g. some test runners). */
+export function browserNavigator(): BrowserNavigator | undefined {
+  return typeof navigator === 'undefined' ? undefined : navigator;
+}
 
 export const prefixHighlight = {
   repo: 'tmux-plugins/tmux-prefix-highlight',
@@ -36,10 +43,11 @@ export const prefixHighlight = {
 } satisfies PluginEmulator;
 
 let battery: BatteryManager | null = null;
-async function watchBattery(refresh: () => void) {
-  if (battery || typeof navigator === 'undefined' || !(navigator as BrowserNavigator).getBattery) return;
+async function watchBattery(refresh: () => void): Promise<void> {
+  const nav = browserNavigator();
+  if (battery || !nav?.getBattery) return;
   try {
-    battery = await (navigator as BrowserNavigator).getBattery!();
+    battery = await nav.getBattery();
     for (const ev of ['levelchange', 'chargingchange']) battery.addEventListener(ev, refresh);
     refresh();
   } catch { battery = null; }
@@ -50,14 +58,14 @@ export const tmuxBattery = {
   description: '#{battery_percentage}, #{battery_icon}, #{battery_status}, #{battery_remain} via navigator.getBattery().',
   optionPrefixes: ['@batt'],
   apply(t, api) {
-    watchBattery(api.refresh);
-    const pct = () => (battery ? Math.round(battery.level * 100) : null);
-    api.formatVar('battery_percentage', () => (pct() == null ? '' : `${pct()}%`));
+    void watchBattery(api.refresh);
+    const pct = (b: BatteryManager) => Math.round(b.level * 100);
+    api.formatVar('battery_percentage', () => (battery ? `${pct(battery)}%` : ''));
     api.formatVar('battery_status', () => (battery ? (battery.charging ? 'charging' : 'discharging') : ''));
     api.formatVar('battery_icon', () => {
       if (!battery) return '';
       if (battery.charging) return api.option('@batt_icon_status_charging', '⚡');
-      const p = pct()!;
+      const p = pct(battery);
       if (p >= 95) return api.option('@batt_icon_charge_tier8', '█');
       if (p >= 65) return api.option('@batt_icon_charge_tier6', '▆');
       if (p >= 35) return api.option('@batt_icon_charge_tier4', '▄');
@@ -80,7 +88,7 @@ export const onlineStatus = {
       window.addEventListener('online', api.refresh);
       window.addEventListener('offline', api.refresh);
     }
-    api.formatVar('online_status', () => (typeof navigator !== 'undefined' && navigator.onLine === false
+    api.formatVar('online_status', () => (browserNavigator()?.onLine === false
       ? api.option('@offline_icon', 'offline')
       : api.option('@online_icon', 'online')));
   },

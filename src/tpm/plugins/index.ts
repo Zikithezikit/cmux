@@ -12,7 +12,7 @@ import fzfUrl from './fzf-url.js';
 import { prefixHighlight, tmuxBattery, onlineStatus } from './status-extras.js';
 import type { PluginEmulator } from '../tpm.js';
 
-export const EMULATORS: PluginEmulator[] = [
+export const EMULATORS: readonly PluginEmulator[] = [
   tpmSelf, sensible, resurrect, continuum, yank, painControl,
   vimTmuxNavigator, dracula, fzfUrl, prefixHighlight, tmuxBattery, onlineStatus,
 ];

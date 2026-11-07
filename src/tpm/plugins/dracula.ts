@@ -2,27 +2,18 @@
 // Status-bar widgets that were shell scripts are provided as #{dracula_*}
 // format variables backed by browser APIs (wttr.in, getBattery, navigator).
 
+import { browserNavigator } from './status-extras.js';
+import type { BatteryManager } from './status-extras.js';
 import type { PluginApi, PluginEmulator } from '../tpm.js';
 
-/** Battery Status API (not in lib.dom). */
-interface BatteryManager extends EventTarget {
-  level: number;
-  charging: boolean;
-}
-
-type BrowserNavigator = Navigator & {
-  connection?: { effectiveType?: string };
-  getBattery?(): Promise<BatteryManager>;
-};
-
-const C: Record<string, string> = {
+const C: Readonly<Record<string, string>> = {
   white: '#f8f8f2', gray: '#44475a', dark_gray: '#282a36', light_purple: '#bd93f9',
   dark_purple: '#6272a4', cyan: '#8be9fd', green: '#50fa7b', orange: '#ffb86c',
   red: '#ff5555', pink: '#ff79c6', yellow: '#f1fa8c',
 };
 
 // Default "<bg> <fg>" colours per widget, from dracula.sh.
-const WIDGET_COLOURS: Record<string, string> = {
+const WIDGET_COLOURS: Readonly<Record<string, string>> = {
   battery: 'pink dark_gray', network: 'cyan dark_gray', 'network-bandwidth': 'cyan dark_gray',
   'network-ping': 'cyan dark_gray', weather: 'orange dark_gray', time: 'dark_purple white',
   'cpu-usage': 'orange dark_gray', 'ram-usage': 'cyan dark_gray', git: 'green dark_gray',
@@ -33,7 +24,11 @@ const WIDGET_COLOURS: Record<string, string> = {
 
 const state = { weather: '', weatherAt: 0 };
 
-async function fetchWeather(api: PluginApi) {
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null;
+}
+
+async function fetchWeather(api: PluginApi): Promise<void> {
   const fixed = api.option('@dracula-fixed-location', '');
   const fahrenheit = api.option('@dracula-show-fahrenheit', 'true') === 'true';
   const showLocation = api.option('@dracula-show-location', 'true') === 'true';
@@ -42,9 +37,13 @@ async function fetchWeather(api: PluginApi) {
     // wttr.in serves HTML to browser user agents for text formats; JSON (j1) works everywhere.
     const res = await api.fetch(`https://wttr.in/${loc}?format=j1`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const cur = (await res.json()).current_condition[0];
-    const desc = (cur.weatherDesc?.[0]?.value || '').trim();
-    const temp = fahrenheit ? `${cur.temp_F}°F` : `${cur.temp_C}°C`;
+    const data = await res.json();
+    const cur: unknown = isRecord(data) && Array.isArray(data.current_condition) ? data.current_condition[0] : undefined;
+    if (!isRecord(cur)) throw new Error('unexpected wttr.in response');
+    const weatherDesc: unknown = Array.isArray(cur.weatherDesc) ? cur.weatherDesc[0] : undefined;
+    const value = isRecord(weatherDesc) ? weatherDesc.value : undefined;
+    const desc = (typeof value === 'string' ? value : '').trim();
+    const temp = fahrenheit ? `${String(cur.temp_F)}°F` : `${String(cur.temp_C)}°C`;
     let text = `${desc} ${temp}`.trim();
     if (showLocation && fixed) text += ` ${fixed}`;
     state.weather = text;
@@ -78,7 +77,7 @@ export default {
     const dayMonth = bool('day-month', 'false');
     const refresh = Number(opt('refresh-rate', '5')) || 5;
 
-    const icons: Record<string, string> = { smiley: '☺', session: '#S', window: '#W', hostname: '#H', shortname: '#h' };
+    const icons: Readonly<Record<string, string>> = { smiley: '☺', session: '#S', window: '#W', hostname: '#H', shortname: '#h' };
     const leftIcon = (icons[leftIconOpt] ?? leftIconOpt) + ' '.repeat(Math.max(0, leftPadding));
 
     api.set('status-interval', String(refresh));
@@ -161,18 +160,22 @@ export default {
 
     // Widget data sources.
     api.formatVar('dracula_weather', () => {
-      if (!state.weatherAt) { state.weatherAt = 1; fetchWeather(api); }
+      if (!state.weatherAt) { state.weatherAt = 1; void fetchWeather(api); }
       return state.weather || 'Loading weather...';
     });
     if (plugins.includes('weather')) api.every(20 * 60 * 1000, () => fetchWeather(api));
 
-    api.formatVar('dracula_network', () => (typeof navigator !== 'undefined' && navigator.onLine === false
-      ? 'Offline'
-      : ((navigator as BrowserNavigator).connection?.effectiveType ? `Online ${(navigator as BrowserNavigator).connection!.effectiveType}` : 'Online')));
+    api.formatVar('dracula_network', () => {
+      const nav = browserNavigator();
+      if (nav?.onLine === false) return 'Offline';
+      const type = nav?.connection?.effectiveType;
+      return type ? `Online ${type}` : 'Online';
+    });
 
     let batt: BatteryManager | null = null;
-    if (plugins.includes('battery') && typeof navigator !== 'undefined' && (navigator as BrowserNavigator).getBattery) {
-      (navigator as BrowserNavigator).getBattery!().then((b) => {
+    const battNav = browserNavigator();
+    if (plugins.includes('battery') && battNav?.getBattery) {
+      battNav.getBattery().then((b) => {
         batt = b;
         b.addEventListener('levelchange', api.refresh);
         b.addEventListener('chargingchange', api.refresh);
