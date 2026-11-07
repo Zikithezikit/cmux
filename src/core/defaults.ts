@@ -1,7 +1,6 @@
-// @ts-nocheck
 // Built-in option values and key bindings, mirroring tmux 3.4 defaults.
 
-export const DEFAULT_OPTIONS = {
+export const DEFAULT_OPTIONS: Record<string, string> = {
   // server / session
   prefix: 'C-b',
   prefix2: 'None',
@@ -86,7 +85,7 @@ export const DEFAULT_OPTIONS = {
  * Array options (`name[N]`) and the separator tmux uses to split a value set
  * without an index (null: the whole value is one element).
  */
-export const ARRAY_OPTIONS = {
+export const ARRAY_OPTIONS: Record<string, string | null> = {
   'command-alias': ',', 'terminal-overrides': ',', 'terminal-features': ',', 'update-environment': ' ',
   'status-format': null, 'user-keys': ',', 'pane-colours': ' ',
 };
