@@ -1,14 +1,54 @@
-// @ts-nocheck
 // tmux FORMATS / STYLES implementation used by the status line, pane borders,
 // display-message, set-titles and %if.
 
-const SHORT_ALIASES = {
+/** A format variable lookup, optionally able to loop over and test for items. */
+export interface FormatLookup {
+  (name: string): unknown;
+  loop?(kind: string, flags: string): FormatLoopItem[];
+  exists?(kind: string, name: string): boolean;
+}
+
+export interface FormatLoopItem {
+  lookup: FormatLookup;
+  current: boolean;
+}
+
+export type StyleAttrs = Record<string, boolean>;
+
+export interface Style {
+  fg: string | null;
+  bg: string | null;
+  attrs: StyleAttrs;
+}
+
+/** A run of text drawn in one style. */
+export interface Run {
+  text: string;
+  style: Style;
+}
+
+/** CSS declarations produced by styleToCss. */
+export interface StyleCss {
+  color?: string;
+  backgroundColor?: string;
+  fontWeight?: string;
+  opacity?: string;
+  fontStyle?: string;
+  textDecoration?: string;
+  visibility?: string;
+  animation?: string;
+}
+
+/** A value that format/colour functions coerce to a string. */
+export type Stringish = string | number | boolean | null | undefined;
+
+const SHORT_ALIASES: Record<string, string> = {
   S: 'session_name', I: 'window_index', W: 'window_name', P: 'pane_index',
   T: 'pane_title', D: 'pane_id', F: 'window_flags', H: 'host', h: 'host_short',
 };
 
 /** Find the index of the `close` matching an opener that ends just before `start`. */
-function findClose(s, start, open, close) {
+function findClose(s: string, start: number, open: string, close: string): number {
   let depth = 1;
   for (let i = start; i < s.length; i++) {
     const c = s[i];
@@ -35,8 +75,8 @@ function findClose(s, start, open, close) {
 }
 
 /** Split on top-level commas (not inside #{ } / #[ ] and not escaped as #,). */
-function splitTop(s) {
-  const parts = [];
+function splitTop(s: string): string[] {
+  const parts: string[] = [];
   let cur = '';
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
@@ -55,7 +95,7 @@ function splitTop(s) {
   return parts;
 }
 
-const truthy = (v) => v !== '' && v !== '0' && v != null;
+const truthy = (v: unknown): boolean => v !== '' && v !== '0' && v != null;
 
 /**
  * Expand a tmux format string.
@@ -63,7 +103,7 @@ const truthy = (v) => v !== '' && v !== '0' && v != null;
  * Style blocks (#[...]) are preserved (with their contents expanded) so the
  * caller can turn the result into styled runs.
  */
-export function expandFormat(fmt, lookup, depth = 0) {
+export function expandFormat(fmt: Stringish, lookup: FormatLookup, depth = 0): string {
   if (fmt == null) return '';
   fmt = String(fmt);
   if (depth > 10) return fmt;
@@ -110,13 +150,13 @@ export function expandFormat(fmt, lookup, depth = 0) {
   return out;
 }
 
-function value(name, lookup, depth) {
+function value(name: string, lookup: FormatLookup, depth: number): string {
   if (name.includes('#')) return expandFormat(name, lookup, depth + 1);
   const v = lookup(name);
   return v == null ? '' : String(v);
 }
 
-function evalExpr(expr, lookup, depth) {
+function evalExpr(expr: string, lookup: FormatLookup, depth: number): string {
   // Conditional: ?cond,a,b  (and ?c1,v1,c2,v2,else)
   if (expr[0] === '?') {
     const parts = splitTop(expr.slice(1));
@@ -138,7 +178,7 @@ function evalExpr(expr, lookup, depth) {
   return value(expr, lookup, depth);
 }
 
-function applyModifiers(mods, rest, lookup, depth) {
+function applyModifiers(mods: string, rest: string, lookup: FormatLookup, depth: number): string {
   const list = mods.split(';');
   // Binary operators operate on the comma-separated arguments.
   const head = list[0];
@@ -168,7 +208,7 @@ function applyModifiers(mods, rest, lookup, depth) {
   const e = /^e\|([-+*/%]|==|!=|<|>|<=|>=|m)\|(f)?\|?(\d+)?$/.exec(head);
   if (e) {
     const [a, b] = splitTop(rest).map((p) => Number(expandFormat(p, lookup, depth + 1)) || 0);
-    const ops = {
+    const ops: Record<string, number> = {
       '+': a + b, '-': a - b, '*': a * b, '/': b ? a / b : 0, '%': b ? a % b : 0, m: b ? a % b : 0,
       '==': +(a === b), '!=': +(a !== b), '<': +(a < b), '>': +(a > b), '<=': +(a <= b), '>=': +(a >= b),
     };
@@ -216,7 +256,7 @@ function applyModifiers(mods, rest, lookup, depth) {
     } else if ((mm = /^s\/((?:\\\/|[^/])*)\/((?:\\\/|[^/])*)\/?(i)?$/.exec(mod))) {
       try { v = v.replace(new RegExp(mm[1], 'g' + (mm[3] || '')), mm[2].replace(/\\(\d)/g, '$$$1')); } catch { /* bad regexp */ }
     } else if (mod === 'b') {
-      v = v.replace(/\/+$/, '').split('/').pop();
+      v = v.replace(/\/+$/, '').split('/').pop()!;
     } else if (mod === 'd') {
       v = v.replace(/\/[^/]*\/?$/, '') || '/';
     } else if (mod === 'n') {
@@ -246,12 +286,12 @@ function applyModifiers(mods, rest, lookup, depth) {
   return v;
 }
 
-function lookupMaybe(s, lookup) {
+function lookupMaybe(s: string, lookup: FormatLookup): unknown {
   const v = lookup(s);
   return v == null ? s : v;
 }
 
-function globToRegExp(glob, flags) {
+function globToRegExp(glob: string, flags: string): RegExp {
   let re = '';
   for (const ch of glob) {
     if (ch === '*') re += '.*';
@@ -266,24 +306,24 @@ function globToRegExp(glob, flags) {
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
   'September', 'October', 'November', 'December'];
-const pad = (n, w = 2, c = '0') => String(n).padStart(w, c);
+const pad = (n: unknown, w = 2, c = '0'): string => String(n).padStart(w, c);
 
-export function strftime(fmt, d = new Date()) {
+export function strftime(fmt: string, d: Date = new Date()): string {
   if (!fmt.includes('%')) return fmt;
-  return fmt.replace(/%([-_0^#]?)([a-zA-Z%+])/g, (all, flag, ch) => {
+  return fmt.replace(/%([-_0^#]?)([a-zA-Z%+])/g, (all: string, flag: string, ch: string) => {
     const h12 = d.getHours() % 12 || 12;
-    const map = {
+    const map: Record<string, string> = {
       a: DAYS[d.getDay()].slice(0, 3), A: DAYS[d.getDay()],
       b: MONTHS[d.getMonth()].slice(0, 3), h: MONTHS[d.getMonth()].slice(0, 3), B: MONTHS[d.getMonth()],
       c: d.toLocaleString(), C: pad(Math.floor(d.getFullYear() / 100)),
       d: pad(d.getDate()), e: pad(d.getDate(), 2, ' '), D: `${pad(d.getMonth() + 1)}/${pad(d.getDate())}/${pad(d.getFullYear() % 100)}`,
       F: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
       H: pad(d.getHours()), I: pad(h12), k: pad(d.getHours(), 2, ' '), l: pad(h12, 2, ' '),
-      j: pad(Math.floor((d - new Date(d.getFullYear(), 0, 1)) / 864e5) + 1, 3),
+      j: pad(Math.floor((d as unknown as number - (new Date(d.getFullYear(), 0, 1) as unknown as number)) / 864e5) + 1, 3),
       m: pad(d.getMonth() + 1), M: pad(d.getMinutes()), n: '\n', t: '\t',
       p: d.getHours() < 12 ? 'AM' : 'PM', P: d.getHours() < 12 ? 'am' : 'pm',
       r: `${pad(h12)}:${pad(d.getMinutes())}:${pad(d.getSeconds())} ${d.getHours() < 12 ? 'AM' : 'PM'}`,
-      R: `${pad(d.getHours())}:${pad(d.getMinutes())}`, s: String(Math.floor(d / 1000)),
+      R: `${pad(d.getHours())}:${pad(d.getMinutes())}`, s: String(Math.floor(d as unknown as number / 1000)),
       S: pad(d.getSeconds()), T: `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`,
       u: String(d.getDay() || 7), w: String(d.getDay()), y: pad(d.getFullYear() % 100), Y: String(d.getFullYear()),
       x: d.toLocaleDateString(), X: d.toLocaleTimeString(),
@@ -307,7 +347,7 @@ const BASE16 = [
 ];
 const NAMES = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white'];
 
-function colour256(n) {
+function colour256(n: number): string {
   if (n < 16) return BASE16[n];
   if (n < 232) {
     n -= 16;
@@ -320,7 +360,7 @@ function colour256(n) {
 }
 
 /** Convert a tmux colour to CSS. Returns null for default/terminal. */
-export function colourToCss(c) {
+export function colourToCss(c: Stringish): string | null {
   if (!c) return null;
   c = String(c).trim().toLowerCase();
   if (c === 'default' || c === 'terminal') return null;
@@ -339,13 +379,13 @@ export function colourToCss(c) {
 
 const ATTRS = ['bright', 'bold', 'dim', 'underscore', 'blink', 'reverse', 'hidden', 'italics', 'strikethrough', 'overline'];
 
-export function emptyStyle() {
+export function emptyStyle(): Style {
   return { fg: null, bg: null, attrs: {} };
 }
 
 /** Apply a tmux style string (e.g. "fg=red,bg=default,bold") to `style`. */
-export function applyStyle(style, str, base = emptyStyle()) {
-  const s = { fg: style.fg, bg: style.bg, attrs: { ...style.attrs } };
+export function applyStyle(style: Style, str: unknown, base: Style = emptyStyle()): Style {
+  const s: Style = { fg: style.fg, bg: style.bg, attrs: { ...style.attrs } };
   for (let tok of String(str || '').split(/[\s,]+/)) {
     tok = tok.trim();
     if (!tok) continue;
@@ -374,15 +414,15 @@ export function applyStyle(style, str, base = emptyStyle()) {
   return s;
 }
 
-export function parseStyle(str, base = emptyStyle()) {
+export function parseStyle(str: unknown, base: Style = emptyStyle()): Style {
   return applyStyle(base, str, base);
 }
 
 /**
  * Turn an expanded format (with #[style] blocks) into runs of { text, style }.
  */
-export function toRuns(expanded, base = emptyStyle()) {
-  const runs = [];
+export function toRuns(expanded: string, base: Style = emptyStyle()): Run[] {
+  const runs: Run[] = [];
   let style = base;
   let buf = '';
   const flush = () => { if (buf) { runs.push({ text: buf, style }); buf = ''; } };
@@ -405,16 +445,16 @@ export function toRuns(expanded, base = emptyStyle()) {
 }
 
 /** Visible length of runs. */
-export function runsLength(runs) {
+export function runsLength(runs: Run[]): number {
   return runs.reduce((n, r) => n + [...r.text].length, 0);
 }
 
 /** Truncate runs to `max` visible characters (keep the left part). */
-export function truncateRuns(runs, max, fromLeft = false) {
+export function truncateRuns(runs: Run[], max: number | null | undefined, fromLeft = false): Run[] {
   if (max == null || max < 0) return runs;
   const total = runsLength(runs);
   if (total <= max) return runs;
-  const out = [];
+  const out: Run[] = [];
   if (!fromLeft) {
     let left = max;
     for (const r of runs) {
@@ -436,22 +476,22 @@ export function truncateRuns(runs, max, fromLeft = false) {
 }
 
 /** Strip style blocks, returning plain text. */
-export function plainText(expanded) {
+export function plainText(expanded: string): string {
   return toRuns(expanded).map((r) => r.text).join('');
 }
 
 /** CSS declaration object for a style. */
-export function styleToCss(style) {
+export function styleToCss(style: Style): StyleCss {
   let fg = style.fg, bg = style.bg;
   const a = style.attrs || {};
   if (a.reverse) [fg, bg] = [bg || 'var(--term-bg)', fg || 'var(--term-fg)'];
-  const css = {};
+  const css: StyleCss = {};
   if (fg) css.color = fg;
   if (bg) css.backgroundColor = bg;
   if (a.bold) css.fontWeight = 'bold';
   if (a.dim) css.opacity = '0.65';
   if (a.italics) css.fontStyle = 'italic';
-  const deco = [];
+  const deco: string[] = [];
   if (a.underscore) deco.push('underline');
   if (a.strikethrough) deco.push('line-through');
   if (a.overline) deco.push('overline');
