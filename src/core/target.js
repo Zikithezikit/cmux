@@ -100,6 +100,14 @@ export function resolveTarget(server, spec, kind, ctx = {}, geometry = null) {
   if (spec == null || spec === '') return done(curSession, curWindow, ctx.pane ?? null);
   spec = String(spec);
 
+  // The marked pane: `~` or `{marked}` (alone, or as the pane part of a target).
+  if (spec === '~' || spec === '{marked}' || /[:.](~|\{marked\})$/.test(spec)) {
+    const id = server.markedPane?.();
+    if (id == null) return null;
+    const loc = server.locate(id);
+    return loc ? { session: loc.session, window: loc.window, pane: id } : null;
+  }
+
   if (spec[0] === '%' && /^%\d+$/.test(spec)) {
     const id = Number(spec.slice(1));
     const loc = server.locate(id);

@@ -356,6 +356,37 @@ try {
     assert.equal(await w2.evaluate(() => window.ctmux.t.getOption('@e2e')), 'reloaded');
   });
 
+  // --- marked panes, display-menu, display-popup ------------------------------
+  await step('marked pane, pane menu (prefix >) and a URL popup', async () => {
+    const w = await open();
+    const panes = async () => (await state(w)).panes.length;
+    await prefix(w, '%', 'Control+s');
+    assert.equal(await panes(), 2);
+    await prefix(w, 'm', 'Control+s');
+    assert.equal(await w.locator('.pane.marked').count(), 1, 'prefix m marks the pane');
+    await prefix(w, '>', 'Control+s'); // pane menu
+    assert.equal((await state(w)).overlay, 'menu');
+    const text = await w.textContent('.ov-menu');
+    assert.match(text, /Horizontal Split/);
+    assert.match(text, /Unmark/, 'menu items are formats: the pane is marked');
+    await shot(w, 'menu');
+    await w.keyboard.press('v');
+    await w.waitForTimeout(200);
+    assert.equal((await state(w)).overlay, null);
+    assert.equal(await panes(), 3, 'menu shortcut ran split-window -v');
+    await w.evaluate((u) => window.ctmux.t.runString(`display-popup -w 60% -h 50% -T docs ${u}/plain`), base);
+    await w.waitForTimeout(400);
+    assert.equal((await state(w)).overlay, 'popup');
+    assert.equal(await w.getAttribute('.ov-popup iframe', 'src'), `${base}/plain`);
+    await shot(w, 'popup');
+    await w.evaluate(() => window.ctmux.t.runString('display-popup -C'));
+    await w.waitForTimeout(100);
+    assert.equal((await state(w)).overlay, null);
+    await prefix(w, 'M', 'Control+s');
+    assert.equal(await w.locator('.pane.marked').count(), 0, 'prefix M clears the mark');
+    await w.close();
+  });
+
   await step('no console errors', async () => {
     assert.deepEqual(errors.filter((e) => !/wttr\.in|ERR_INTERNET|net::/.test(e)), []);
   });

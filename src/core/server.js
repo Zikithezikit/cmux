@@ -13,6 +13,14 @@ export class Server extends EventTarget {
     this.panes = {};
     this.seq = { session: 0, window: 0, pane: 0 };
     this.created = Date.now();
+    this.marked = null; // the marked pane (select-pane -m), server-wide like tmux
+  }
+
+  /** The marked pane id, or null if none (or it no longer exists). */
+  markedPane() {
+    if (this.marked == null) return null;
+    if (!this.panes[this.marked] || !this.locate(this.marked)) { this.marked = null; return null; }
+    return this.marked;
   }
 
   // ------------------------------------------------------------ persistence

@@ -527,6 +527,12 @@
         sendKeys(msg.keys || [], msg.literal);
         sendResponse(true);
         return false;
+      case 'capture': {
+        // capture-pane: the page's visible text (or the whole document with -S -).
+        const text = String(document.body?.innerText || '');
+        sendResponse({ text: msg.all ? text : text.slice(0, 200000), title: document.title, url: location.href });
+        return false;
+      }
       case 'collect-links':
         sendResponse(collectLinks(msg.limit || 2000));
         return false;

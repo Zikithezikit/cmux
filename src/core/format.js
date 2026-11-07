@@ -131,7 +131,7 @@ function evalExpr(expr, lookup, depth) {
 
   // Modifiers: everything before the first top-level ':'.
   const m = /^((?:[^:{}#]|#[^{[])*?):/.exec(expr);
-  if (m && m[1] !== '' && /^[=!<>|&lbdmneETqsptN]/.test(m[1])) {
+  if (m && m[1] !== '' && /^[=!<>|&lbdmneETqsptNSWPLacwRC]/.test(m[1])) {
     return applyModifiers(m[1], expr.slice(m[0].length), lookup, depth);
   }
   return value(expr, lookup, depth);
@@ -164,7 +164,7 @@ function applyModifiers(mods, rest, lookup, depth) {
     }
     return globToRegExp(pat, flags).test(target) ? '1' : '0';
   }
-  const e = /^e\|([-+*/%]|==|!=|<|>|<=|>=|m)\|(f)?(\d+)?$/.exec(head);
+  const e = /^e\|([-+*/%]|==|!=|<|>|<=|>=|m)\|(f)?\|?(\d+)?$/.exec(head);
   if (e) {
     const [a, b] = splitTop(rest).map((p) => Number(expandFormat(p, lookup, depth + 1)) || 0);
     const ops = {
@@ -176,7 +176,31 @@ function applyModifiers(mods, rest, lookup, depth) {
   }
 
   if (head === 'l') return rest;
+  // Loops over sessions / windows / panes: #{W:fmt} or #{W:fmt,current-fmt}; flags /n (by name), /r (reverse).
+  const loop = /^([SWPL])(?:\/([a-z]*))?$/.exec(head);
+  if (loop) {
+    const items = lookup.loop ? lookup.loop(loop[1], loop[2] || '') : [];
+    const [normal = '', current] = splitTop(rest);
+    return items.map((it) => expandFormat(it.current && current !== undefined ? current : normal, it.lookup, depth + 1)).join('');
+  }
+  // #{N:name} / #{N/w:name} / #{N/s:name}: does a window (or session) with this name exist?
+  const nexist = /^N(?:\/([ws]))?$/.exec(head);
+  if (nexist) {
+    const nm = rest.includes('#') ? expandFormat(rest, lookup, depth + 1) : rest;
+    return lookup.exists?.(nexist[1] || 'w', nm) ? '1' : '0';
+  }
+  if (head === '!' || head === '!!') {
+    const v = rest.includes('#') ? expandFormat(rest, lookup, depth + 1) : lookupMaybe(rest, lookup);
+    return truthy(v) === (head === '!!') ? '1' : '0';
+  }
+  if (head === 'C' || head.startsWith('C/')) return '0'; // pane content search: no terminal grid
+  if (/^R$/.test(head)) {
+    const [str = '', n = '0'] = splitTop(rest).map((p) => expandFormat(p, lookup, depth + 1));
+    return str.repeat(Math.max(0, Math.min(1000, Number(n) || 0)));
+  }
   let v = rest.includes('#') ? expandFormat(rest, lookup, depth + 1) : value(rest, lookup, depth);
+  // #{a:98}, #{c:red}: a literal argument is allowed when it isn't a variable.
+  if (!rest.includes('#') && lookup(rest) == null && list.every((x) => x === 'a' || x === 'c' || x === 'w')) v = rest;
   for (const mod of list) {
     let mm;
     if ((mm = /^=(\/)?(-?\d+)(?:\/(.*))?$/.exec(mod))) {
@@ -200,7 +224,18 @@ function applyModifiers(mods, rest, lookup, depth) {
       v = expandFormat(v, lookup, depth + 1);
     } else if (mod === 't' || mod.startsWith('t/')) {
       const d = new Date(Number(v) * 1000);
-      if (!Number.isNaN(d.getTime())) v = d.toString().slice(0, 24);
+      const custom = /^t\/f\/(.*)$/.exec(mod);
+      if (Number.isNaN(d.getTime())) { /* not a time */ }
+      else if (custom) v = strftime(custom[1].replace(/%%/g, '%'), d);
+      else if (mod.includes('p')) v = d.toTimeString().slice(0, 5);
+      else v = d.toString().slice(0, 24);
+    } else if (mod === 'a') {
+      const n = Number(v);
+      v = Number.isFinite(n) && n > 0 ? String.fromCodePoint(n) : '';
+    } else if (mod === 'c') {
+      v = colourToCss(v) || '';
+    } else if (mod === 'w') {
+      v = String([...v].length);
     } else if (mod === 'T') {
       v = strftime(v, new Date());
     } else if (mod === 'q') {

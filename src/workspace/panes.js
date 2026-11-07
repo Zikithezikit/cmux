@@ -165,6 +165,7 @@ export class PaneView {
     const borderStyle = parseStyle(t.getOption('pane-border-style'));
     const activeStyle = parseStyle(t.getOption('pane-active-border-style'));
     const many = Object.keys(rects).length > 1;
+    const marked = srv.markedPane();
 
     for (const [id, v] of this.els) {
       const r = rects[id];
@@ -174,6 +175,7 @@ export class PaneView {
       const showTitle = borderStatus === 'top' || borderStatus === 'bottom';
       v.root.classList.toggle('title-top', borderStatus === 'top');
       v.root.classList.toggle('title-bottom', borderStatus === 'bottom');
+      v.root.classList.toggle('marked', Number(id) === marked);
       v.title.textContent = '';
       if (showTitle) {
         const active = Number(id) === window.active;

@@ -121,7 +121,7 @@ test('command prompt templates and targets', async () => {
 
 test('%if / %elif / %else and if-shell -F', async () => {
   const { t } = await boot(`
-%if "#{==:#{version},3.4-chrome}"
+%if "#{==:#{version},3.4}"
 set -g @a yes
 %elif 1
 set -g @a elif
@@ -140,7 +140,7 @@ set -g status-bg red
   assert.equal(t.getOption('@a'), 'yes');
   assert.equal(t.getOption('@b'), '2');
   assert.equal(t.getOption('@c'), 'on');
-  assert.equal(t.getOption('@d'), 'off');
+  assert.equal(t.getOption('@d'), 'on', '$TMUX is set, like inside real tmux');
   assert.match(t.getOption('status-style'), /bg=red/);
 });
 
