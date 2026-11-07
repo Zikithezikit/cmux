@@ -1,26 +1,18 @@
 // Modal UI: status-line prompts/messages, list views, choose-tree, the fuzzy
 // picker, display-panes, clock-mode, the detached screen and the debug panel.
 
-import { COMMANDS } from '../core/commands.js';
+import { COMMANDS, toUrl } from '../core/commands.js';
 import { colourToCss } from '../core/format.js';
 import * as L from '../core/layout.js';
 import { quoteArg } from '../core/parser.js';
-import { toUrl } from '../core/commands.js';
 import type {
   Rect, Session, Window,
   MessageOptions, PromptOptions, ConfirmOptions, ShowListOptions, PickItem, PickOptions, PickResult, MenuItem, MenuOptions, PopupDimension, PopupOptions, ChooseTreeOptions, DisplayPanesOptions,
 } from '../core/types.js';
-
-export type { MessageOptions, PromptOptions, ConfirmOptions, ShowListOptions, PickItem, PickOptions, PickResult, MenuItem, MenuOptions, PopupDimension, PopupOptions, ChooseTreeOptions, DisplayPanesOptions };
 import type { Tmux } from '../core/tmux.js';
-import type { Server } from '../core/server.js';
 import type { StatusOverlay } from './status.js';
 
-/** The server, as the overlays see it. */
-export type OverlayServer = Server;
-
-/** The tmux engine, as the overlays see it. */
-export type OverlayTmux = Tmux;
+export type { MessageOptions, PromptOptions, ConfirmOptions, ShowListOptions, PickItem, PickOptions, PickResult, MenuItem, MenuOptions, PopupDimension, PopupOptions, ChooseTreeOptions, DisplayPanesOptions };
 
 export interface ConfigInfo {
   label: string;
@@ -30,7 +22,7 @@ export interface ConfigInfo {
 
 /** What the overlays need from the workspace controller. */
 export interface OverlayHost {
-  readonly t: OverlayTmux;
+  readonly t: Tmux;
   view: { areaRect: Rect; rects: Record<number, Rect> };
   cell: { w: number; h: number };
   keySink(): void;
@@ -111,16 +103,24 @@ type ElLeaf = Node | string | number | null | undefined;
 type ElChild = ElLeaf | ElLeaf[];
 type ElProps = Record<string, unknown>;
 
-const toPopupUrl = (v: string, t: OverlayTmux): string => toUrl(v, t.getOption('@ctmux-search-url'));
+/** The `message` of a thrown value, if it has one. */
+function errorMessage(err: unknown): unknown {
+  return typeof err === 'object' && err !== null && 'message' in err ? err.message : undefined;
+}
 
-const { eventToKey } = globalThis.CtmuxKeys;
+const toPopupUrl = (v: string, t: Tmux): string => toUrl(v, t.getOption('@ctmux-search-url'));
+
+const keys = globalThis.CtmuxKeys;
+const eventToKey = (e: KeyboardEvent): string | null => keys.eventToKey(e);
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, props: ElProps = {}, ...children: ElChild[]): HTMLElementTagNameMap[K] => {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(props)) {
-    if (k === 'class') e.className = v as string;
+    if (k === 'class') e.className = String(v);
     else if (k === 'style') Object.assign(e.style, v);
+    // Callers only pass listener functions for on* props.
     else if (k.startsWith('on')) e.addEventListener(k.slice(2), v as EventListener);
+    // Attribute props are strings or numbers; setAttribute stringifies them itself.
     else if (v != null) e.setAttribute(k, v as string);
   }
   for (const c of children.flat()) if (c != null) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
@@ -182,7 +182,7 @@ export class Overlays {
     this.promptHistory = [];
   }
 
-  get t(): OverlayTmux { return this.app.t; }
+  get t(): Tmux { return this.app.t; }
 
   get active(): OverlayEntry | null { return this.stack[this.stack.length - 1] || null; }
 
@@ -229,7 +229,7 @@ export class Overlays {
 
   message(text: unknown, { duration }: MessageOptions = {}): void {
     if (this.statusOverlay?.prompt) return; // don't clobber an active prompt
-    clearTimeout(this.messageTimer!);
+    if (this.messageTimer != null) clearTimeout(this.messageTimer);
     this.statusOverlay = { message: String(text) };
     this.app.renderStatus();
     const ms = duration ?? Number(this.t.getOption('display-time'));
@@ -257,7 +257,7 @@ export class Overlays {
       const show = () => {
         label.textContent = opts.prompts[step] ?? opts.prompts[opts.prompts.length - 1] ?? ':';
         input.value = opts.inputs?.[step] ?? '';
-        clearTimeout(this.messageTimer!);
+        if (this.messageTimer != null) clearTimeout(this.messageTimer);
         this.statusOverlay = { prompt: box, command: opts.command };
         this.app.renderStatus();
         input.focus();
@@ -356,7 +356,6 @@ export class Overlays {
 
   /** Generic scrolling list, optionally filterable and selectable. */
   list<R extends ListRow | string>({ title, rows, filterable = false, select = false, hint = '', onSelect, onKey, zoom = true, initial = 0, filter = '' }: ListOptions<R>): ListEntry<R> {
-    const entry = { kind: 'list' } as ListEntry<R>;
     const body = el('div', { class: 'ov-body' });
     const filterInput = el('input', { type: 'text', spellcheck: 'false', placeholder: 'filter' });
     filterInput.value = filter;
@@ -367,7 +366,6 @@ export class Overlays {
     if (hint) dom.append(el('div', { class: 'ov-foot' }, hint));
     this.place(dom, this.paneBox(zoom));
     this.root.appendChild(dom);
-    entry.dom = dom;
 
     let shown: { r: R; text: string; m: FuzzyMatch }[] = [];
     let sel = initial;
@@ -375,7 +373,7 @@ export class Overlays {
       const q = filterInput.value;
       shown = [];
       for (const r of rows()) {
-        const text = typeof r === 'string' ? r : (r as ListRow).text;
+        const text = typeof r === 'string' ? r : r.text;
         const m = fuzzy(q, text);
         if (m.score < 0) continue;
         shown.push({ r, text, m });
@@ -385,7 +383,8 @@ export class Overlays {
       body.textContent = '';
       shown.forEach((s, i) => {
         const row = el('div', { class: 'row' + (select && i === sel ? ' sel' : '') }, ...highlight(s.text, q ? s.m.idx : []));
-        if ((s.r as ListRow).dim) row.append(el('span', { class: 'dim' }, (s.r as ListRow).dim));
+        const dim = typeof s.r === 'string' ? undefined : s.r.dim;
+        if (dim) row.append(el('span', { class: 'dim' }, dim));
         row.addEventListener('mousedown', (e) => { e.preventDefault(); sel = i; render(); if (select) choose(); });
         body.appendChild(row);
       });
@@ -397,10 +396,7 @@ export class Overlays {
       if (!s) return;
       onSelect?.(s.r, key, entry);
     };
-    entry.render = render;
-    entry.refocus = () => (filterable && filterInput.value ? filterInput.focus() : this.app.keySink());
-    entry.selected = () => shown[sel]?.r;
-    entry.onKey = (e) => {
+    const onEntryKey = (e: KeyboardEvent): boolean => {
       const key = eventToKey(e);
       if (!key) return true;
       const inFilter = filterable && document.activeElement === filterInput;
@@ -425,6 +421,14 @@ export class Overlays {
       if (filterable && key.length === 1 && !select) { filterInput.focus(); return false; }
       e.preventDefault();
       return true;
+    };
+    const entry: ListEntry<R> = {
+      kind: 'list',
+      dom,
+      render,
+      refocus: () => (filterable && filterInput.value ? filterInput.focus() : this.app.keySink()),
+      selected: () => shown[sel]?.r,
+      onKey: onEntryKey,
     };
     filterInput.addEventListener('input', () => { sel = 0; render(); });
     this.push(entry);
@@ -643,7 +647,7 @@ export class Overlays {
       try {
         await t.runString(build(answer[0].trim()));
       } catch (err) {
-        this.message(String((err as Error).message || err));
+        this.message(String(errorMessage(err) || err));
       }
       if (closeAfter && this.stack.includes(entry)) { this.close(entry); this.app.focusPane(); }
       else entry.render();
@@ -651,18 +655,18 @@ export class Overlays {
     const entry = this.list({
       title: `choose-tree (${mode})`, rows, select: true, filterable: true, zoom, initial: Math.max(0, cur), filter,
       hint: 'Enter switch · n new session · c new window · $ rename session · , rename window · x kill · h/l fold · / filter · q quit',
-      onSelect: (r) => go(r),
+      onSelect: (r) => { void go(r); },
       onKey: (key) => {
         if (document.activeElement?.tagName === 'INPUT') return false;
         if (key === 'n') {
-          ask('(new-session) name: ', '', (name) => `new-session${name ? ` -s ${quoteArg(name)}` : ''}`, { closeAfter: true });
+          void ask('(new-session) name: ', '', (name) => `new-session${name ? ` -s ${quoteArg(name)}` : ''}`, { closeAfter: true });
           return true;
         }
         const r = entry.selected();
         if (!r) return false;
         const sid = `'$${r.session.id}'`;
         if (key === 'c') {
-          (async () => {
+          void (async () => {
             this.close(entry);
             await t.runString(`new-window -t ${sid}:`);
             this.app.focusPane();
@@ -670,16 +674,16 @@ export class Overlays {
           return true;
         }
         if (key === '$') {
-          ask(`(rename-session) ${r.session.name}: `, r.session.name, (name) => `rename-session -t ${sid} -- ${quoteArg(name)}`);
+          void ask(`(rename-session) ${r.session.name}: `, r.session.name, (name) => `rename-session -t ${sid} -- ${quoteArg(name)}`);
           return true;
         }
         if (key === ',' && r.window) {
-          ask(`(rename-window) ${srv.windowName(r.window)}: `, srv.windowName(r.window), (name) => `rename-window -t @${r.window.id} -- ${quoteArg(name)}`);
+          void ask(`(rename-window) ${srv.windowName(r.window)}: `, srv.windowName(r.window), (name) => `rename-window -t @${r.window.id} -- ${quoteArg(name)}`);
           return true;
         }
         if (key === 'x' || key === 'X') {
           const what = r.kind === 'session' ? `kill-session -t ${sid}` : r.kind === 'window' ? `kill-window -t @${r.window.id}` : `kill-pane -t %${r.pane}`;
-          this.confirm(`${what.split(' ')[0]} ${r.kind === 'session' ? r.session.name : r.kind === 'window' ? r.window.index : r.pane}? (y/n)`).then(async (ok) => {
+          void this.confirm(`${what.split(' ')[0]} ${r.kind === 'session' ? r.session.name : r.kind === 'window' ? r.window.index : r.pane}? (y/n)`).then(async (ok) => {
             if (ok) await t.runString(what);
             if (!srv.sessions.length) this.close(entry); else entry.render();
           });
@@ -688,7 +692,7 @@ export class Overlays {
         if (key === 'Left' || key === 'h' || key === '-') { collapsed.add(r.key); entry.render(); return true; }
         if (key === 'Right' || key === 'l' || key === '+') { collapsed.delete(r.key); entry.render(); return true; }
         const hit = rows().find((row) => row.shortcut === key);
-        if (hit) { go(hit); return true; }
+        if (hit) { void go(hit); return true; }
         return false;
       },
     });
@@ -696,9 +700,11 @@ export class Overlays {
 
   // --------------------------------------------------------- display-panes
 
-  displayPanes({ time }: DisplayPanesOptions): Promise<number | null> {
+  /** `time` defaults to the display-panes-time option; 0 or less waits for a key. */
+  displayPanes({ time }: Partial<DisplayPanesOptions> = {}): Promise<number | null> {
     return new Promise((resolve) => {
       const t = this.t;
+      const ms = time ?? Number(t.getOption('display-panes-time'));
       const w = t.server.window;
       if (!w) return resolve(null);
       const entry: OverlayEntry = { kind: 'display-panes' };
@@ -717,8 +723,8 @@ export class Overlays {
       this.root.appendChild(dom);
       entry.dom = dom;
       let digits = '';
-      const finish = (v: number | null) => { clearTimeout(timer!); this.close(entry); resolve(v); };
-      const timer = time > 0 ? setTimeout(() => finish(null), time) : null;
+      const finish = (v: number | null) => { if (timer != null) clearTimeout(timer); this.close(entry); resolve(v); };
+      const timer = ms > 0 ? setTimeout(() => finish(null), ms) : null;
       entry.onKey = (e) => {
         const key = eventToKey(e);
         if (!key) return true;
@@ -749,7 +755,7 @@ export class Overlays {
     const style24 = t.getOption('clock-mode-style') !== '12';
     const dom = el('div', { class: 'clock', style: { color: colour } });
     this.place(dom, r);
-    const DIG: Record<string, string[]> = {
+    const DIG: Readonly<Record<string, readonly string[]>> = {
       0: ['11111', '1...1', '1...1', '1...1', '11111'], 1: ['....1', '....1', '....1', '....1', '....1'],
       2: ['11111', '....1', '11111', '1....', '11111'], 3: ['11111', '....1', '11111', '....1', '11111'],
       4: ['1...1', '1...1', '11111', '....1', '....1'], 5: ['11111', '1....', '11111', '....1', '11111'],
@@ -799,7 +805,7 @@ export class Overlays {
 
   debugPanel(tab = 'config'): void {
     const existing = this.stack.find((e) => e.kind === 'debug');
-    if (existing) { existing.show!(tab); return; }
+    if (existing) { existing.show?.(tab); return; }
     const t = this.t;
     const body = el('div', { class: 'ov-body' });
     const tabs = el('div', { class: 'tabs' });
@@ -839,7 +845,7 @@ export class Overlays {
         return [
           el('h3', {}, `TPM plugins (${rows.length})`),
           el('div', {},
-            el('button', { class: 'act', onclick: async () => { await t.plugins!.fetchMetadata({ force: true }); render(); } }, 'Fetch GitHub metadata'),
+            el('button', { class: 'act', onclick: async () => { if (!t.plugins) return; await t.plugins.fetchMetadata({ force: true }); render(); } }, 'Fetch GitHub metadata'),
             '  install: prefix I · update: prefix U'),
           rows.length ? tableOf(['plugin', 'status', 'GitHub', 'options'], rows.map((r) => [
             el('div', {}, el('code', {}, r.repo), r.branch ? ` #${r.branch}` : '', el('div', { class: 'lvl-info' }, r.description || ''),
@@ -864,7 +870,7 @@ export class Overlays {
         tabs.append(el('button', { class: k === current ? 'on' : '', onclick: () => { current = k; render(); } }, label));
       }
       body.textContent = '';
-      body.append(...(views[current]().filter(Boolean) as Node[]));
+      body.append(...views[current]().filter((n): n is Node => n != null));
     };
     entry.show = (k: string) => { current = names[k] ? k : current; render(); };
     entry.onKey = (e) => {
