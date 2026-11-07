@@ -87,7 +87,7 @@ export class PaneView {
     if (!v) {
       const root = document.createElement('div');
       root.className = 'pane hidden';
-      root.dataset.pane = pane.id as unknown as string;
+      root.dataset.pane = String(pane.id);
       const body = document.createElement('div');
       body.className = 'body';
       const title = document.createElement('div');
@@ -108,11 +108,11 @@ export class PaneView {
     return v;
   }
 
-  mountFrame(pane: Pane, v: PaneEls) {
+  mountFrame(pane: Pane, v: PaneEls): void {
     const f = document.createElement('iframe');
     f.className = 'frame';
     f.name = `ctmux-pane-${pane.id}`;
-    f.dataset.pane = pane.id as unknown as string;
+    f.dataset.pane = String(pane.id);
     f.setAttribute('sandbox', SANDBOX);
     f.setAttribute('allow', ALLOW);
     f.src = pane.url;
@@ -121,7 +121,7 @@ export class PaneView {
     v.body.appendChild(f);
   }
 
-  mountLauncher(pane: Pane, v: PaneEls) {
+  mountLauncher(pane: Pane, v: PaneEls): void {
     const t = this.t;
     const box = document.createElement('div');
     box.className = 'launcher';
@@ -143,7 +143,7 @@ export class PaneView {
     input.placeholder = 'url, search, or :command';
     input.setAttribute('list', 'ctmux-history');
     input.value = pane.prefill || '';
-    input.dataset.pane = pane.id as unknown as string;
+    input.dataset.pane = String(pane.id);
     form.append(ps1, input);
     form.addEventListener('submit', (e) => {
       e.preventDefault();
@@ -171,7 +171,7 @@ export class PaneView {
     v.body.appendChild(box);
   }
 
-  navigate(pane: Pane) {
+  navigate(pane: Pane): void {
     const v = this.els.get(pane.id);
     if (!v) return;
     if (pane.kind === 'web' && v.kind === 'web' && v.iframe) {
@@ -182,14 +182,14 @@ export class PaneView {
     }
   }
 
-  remount(pane: Pane) {
+  remount(pane: Pane): void {
     const v = this.els.get(pane.id);
     if (v) v.kind = null;
     this.ensure(pane);
   }
 
   /** Lay out the current window; hide everything else. */
-  render() {
+  render(): void {
     const t = this.t;
     const srv = t.server;
     const window = srv.window;
@@ -227,7 +227,7 @@ export class PaneView {
       v.root.classList.toggle('marked', Number(id) === marked);
       v.title.textContent = '';
       if (showTitle) {
-        const active = Number(id) === window!.active;
+        const active = Number(id) === window?.active;
         const st = active ? activeStyle : borderStyle;
         const runs = toRuns(t.expand(t.getOption('pane-border-format'), { window, pane: Number(id) }, { time: true }), st);
         renderRuns(v.title, runs);
@@ -250,7 +250,7 @@ export class PaneView {
     if (many && window) {
       const r = rects[window.active];
       if (r) {
-        const edges = [];
+        const edges: Rect[] = [];
         if (r.x > 0) edges.push({ x: r.x - GAP, y: r.y - (r.y > 0 ? GAP : 0), w: GAP, h: r.h + (r.y > 0 ? GAP : 0) + (r.y + r.h < area.h ? GAP : 0) });
         if (r.x + r.w < area.w) edges.push({ x: r.x + r.w, y: r.y - (r.y > 0 ? GAP : 0), w: GAP, h: r.h + (r.y > 0 ? GAP : 0) + (r.y + r.h < area.h ? GAP : 0) });
         if (r.y > 0) edges.push({ x: r.x, y: r.y - GAP, w: r.w, h: GAP });
@@ -265,7 +265,7 @@ export class PaneView {
     }
   }
 
-  startDrag(e: MouseEvent, d: Divider) {
+  startDrag(e: MouseEvent, d: Divider): void {
     if (e.button !== 0) return;
     e.preventDefault();
     const t = this.t;
@@ -289,7 +289,7 @@ export class PaneView {
     addEventListener('mouseup', up, true);
   }
 
-  focus(paneId: number) {
+  focus(paneId: number): void {
     const v = this.els.get(paneId);
     if (!v) return;
     if (v.iframe) v.iframe.focus();
@@ -297,7 +297,7 @@ export class PaneView {
   }
 
   paneAt(el: EventTarget | null): number | null {
-    const host = (el as Element | null)?.closest?.<HTMLElement>('[data-pane]');
+    const host = el instanceof Element ? el.closest<HTMLElement>('[data-pane]') : null;
     return host ? Number(host.dataset.pane) : null;
   }
 }
