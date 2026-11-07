@@ -1,6 +1,6 @@
 // The tmux engine: options, key tables, config sourcing and command dispatch.
 // It is UI-agnostic; the workspace page supplies a `ui` adapter (see
-// src/workspace/workspace.js) and tests supply a stub.
+// src/workspace/workspace.ts) and tests supply a stub.
 
 import '../shared/keys.js';
 import { tokenize, toCommandList, parseArgs, formatCommandList, argToString } from './parser.js';
@@ -10,20 +10,20 @@ import { Server, paneShortName } from './server.js';
 import { COMMANDS, resolveCommand } from './commands.js';
 import { panesInOrder, computeRects } from './layout.js';
 import { Shell, Unsupported } from './shell.js';
-import type { BlockArg } from './parser.js';
+import type { Arg, CommandList } from './parser.js';
+import type { FormatLookup, FormatLoopItem, Stringish } from './format.js';
+import type { ShellHost, ShellResult } from './shell.js';
 import type { Tpm } from '../tpm/tpm.js';
 import type {
   CommandContext, Geometry, LogEntry, LogLevel, Notice, Pane, Rect, Session, Ui, Window,
 } from './types.js';
 
+export type { Arg, CommandList, FormatLookup, FormatLoopItem, ShellResult };
+
 // ------------------------------------------------------------------ types
 
-/** One parsed argument: a word, or a `{ ... }` block. */
-export type Arg = string | BlockArg;
 /** One command: its name followed by its arguments. */
 export type CommandArgs = Arg[];
-/** A command list as stored in key bindings and hooks (`\;`-separated, words only). */
-export type CommandList = string[][];
 
 export interface KeyBinding {
   key: string;
@@ -63,7 +63,7 @@ export interface PasteBuffer {
 }
 
 /** Hook name -> sparse array of command lists (`set-hook name[N]`). */
-export type HookTable = Record<string, Array<CommandList | undefined>>;
+export type HookTable = Record<string, (CommandList | undefined)[]>;
 
 /** The hook currently running (`#{hook}`, `#{hook_session}`, ...). */
 export interface HookInfo {
@@ -75,17 +75,17 @@ export interface HookInfo {
 
 /** A wait-for channel. */
 export interface WaitChannel {
-  waiters: Array<(value?: unknown) => void>;
+  waiters: ((value?: unknown) => void)[];
   woken: boolean;
   locked: boolean;
-  lockers: Array<(value?: unknown) => void>;
+  lockers: ((value?: unknown) => void)[];
 }
 
 /** Callbacks registered by plugin emulators. */
 export interface PluginHooks {
-  afterConfig: Array<() => void>;
-  change: Array<() => void>;
-  paneReport: Array<() => void>;
+  afterConfig: (() => void)[];
+  change: (() => void)[];
+  paneReport: (() => void)[];
 }
 
 /** What a format variable can resolve to. */
@@ -93,33 +93,17 @@ export type FormatValue = string | number | null | undefined;
 export type FormatVarFn = (ctx: CommandContext) => FormatValue;
 export type ShellVarFn = (cmd: string) => FormatValue;
 
-export interface FormatLoopItem {
-  lookup: FormatLookup;
-  current: boolean;
-}
-
-/** The lookup function handed to expandFormat. */
-export interface FormatLookup {
+/** The lookup `Tmux.lookup()` builds: resolves format values and always supports loops and existence tests. */
+export interface TmuxLookup extends FormatLookup {
   (name: string): FormatValue;
   /** Loops: #{S:...}, #{W:...}, #{P:...}. */
-  loop?: (kind: string, flags?: string) => FormatLoopItem[];
+  loop(kind: string, flags?: string): FormatLoopItem[];
   /** Existence tests: #{N/s:name}, #{N/w:name}. */
-  exists?: (kind: string, name: string) => boolean;
+  exists(kind: string, name: string): boolean;
 }
 
-/** A key routed by a pane agent or the workspace page. */
-export interface RoutedKey {
-  table: string;
-  key: string;
-  prefix?: boolean;
-}
-
-/** Result of running a shell command with the built-in shell subset. */
-export interface ShellResult {
-  code: number;
-  out: string;
-  err?: string;
-}
+/** A key routed by a pane agent or the workspace page (the key router's result). */
+export type RoutedKey = CtmuxRoute;
 
 export type CopyBinding = { local: string[] } | { remote: true };
 
@@ -153,15 +137,15 @@ export interface TmuxOptions {
   now?: () => Date;
 }
 
-/** A pane as the server stores it. */
+/** @deprecated The server stores plain {@link Pane}s; use that. */
 export type ServerPane = Pane;
 
 type PrintFn = (line: string) => void;
 
-const { normalizeKey } = globalThis.CtmuxKeys;
+const Keys = globalThis.CtmuxKeys;
 
 /** tmux options that exist but have no meaning inside a browser. */
-const INERT_OPTIONS = new Set([
+const INERT_OPTIONS: ReadonlySet<string> = new Set([
   'allow-passthrough', 'terminal-overrides', 'terminal-features', 'default-shell', 'update-environment',
   'visual-activity', 'visual-bell', 'visual-silence', 'monitor-activity', 'monitor-bell', 'monitor-silence',
   'bell-action', 'activity-action', 'silence-action', 'word-separators', 'wrap-search', 'xterm-keys',
@@ -175,13 +159,13 @@ const INERT_OPTIONS = new Set([
   'escape-time', 'history-limit', 'default-terminal', 'focus-events', 'aggressive-resize', 'utf8',
   'status-utf8', 'mouse-select-pane', 'mouse-resize-pane', 'mouse-select-window', 'mode-mouse',
   'assume-paste-time', 'backspace', 'remain-on-exit-format', 'lock-server', 'get-clipboard',
-  'input-buffer-size', 'detach-on-destroy', 'activity-action', 'pane-border-indicators',
+  'input-buffer-size', 'detach-on-destroy', 'pane-border-indicators',
   'pane-border-lines', 'window-status-activity-style', 'window-status-bell-style', 'window-style',
   'window-active-style', 'status-bg', 'status-fg',
 ]);
 
 /** Commands whose arguments are themselves a command list (`\;` stays inside). */
-const LIST_COMMANDS = new Set(['bind-key', 'if-shell', 'confirm-before', 'command-prompt', 'set-hook', 'run-shell']);
+const LIST_COMMANDS: ReadonlySet<string> = new Set(['bind-key', 'if-shell', 'confirm-before', 'command-prompt', 'set-hook', 'run-shell']);
 
 export class Tmux {
   declare ui: Ui;
@@ -272,12 +256,12 @@ export class Tmux {
 
   isKnownOption(name: string): boolean {
     const base = name.replace(/\[\d+\]$/, '');
-    return name[0] === '@' || name in DEFAULT_OPTIONS || INERT_OPTIONS.has(name) || base in ARRAY_OPTIONS || /\[\d+\]$/.test(name);
+    return name.startsWith('@') || name in DEFAULT_OPTIONS || INERT_OPTIONS.has(name) || base in ARRAY_OPTIONS || /\[\d+\]$/.test(name);
   }
 
   /** Elements of an array option, as [index, value] pairs sorted by index. */
-  arrayOption(base: string): Array<[number, string]> {
-    const out: Array<[number, string]> = [];
+  arrayOption(base: string): [number, string][] {
+    const out: [number, string][] = [];
     for (const [k, v] of Object.entries(this.options)) {
       if (!k.startsWith(base + '[')) continue;
       const m = /^\[(\d+)\]$/.exec(k.slice(base.length));
@@ -298,19 +282,23 @@ export class Tmux {
   // ----------------------------------------------------------- key tables
 
   table(name: string): KeyTable {
-    if (!this.tables.has(name)) this.tables.set(name, new Map());
-    return this.tables.get(name)!;
+    let t = this.tables.get(name);
+    if (!t) {
+      t = new Map();
+      this.tables.set(name, t);
+    }
+    return t;
   }
 
   bind(table: string, key: string, commands: CommandList, { repeat = false, note = '', origin = 'user' }: BindOptions = {}): string | null {
-    const k = normalizeKey(key);
+    const k = Keys.normalizeKey(key);
     if (!k) return null;
     this.table(table).set(k, { key: k, commands, repeat, note, origin });
     return k;
   }
 
   unbind(table: string, key: string): void {
-    const k = normalizeKey(key);
+    const k = Keys.normalizeKey(key);
     if (k) this.table(table).delete(k);
   }
 
@@ -341,8 +329,8 @@ export class Tmux {
       }
     }
     return {
-      prefix: normalizeKey(this.getOption('prefix')),
-      prefix2: normalizeKey(this.getOption('prefix2')),
+      prefix: Keys.normalizeKey(this.getOption('prefix')),
+      prefix2: Keys.normalizeKey(this.getOption('prefix2')),
       tables,
       repeat,
       repeatTime: Number(this.getOption('repeat-time')) || 0,
@@ -372,7 +360,7 @@ export class Tmux {
     if (depth > 10) { this.notice('source-file nested too deeply', { source }); return; }
     const { commands, errors } = tokenize(text, this.env);
     errors.forEach((e) => this.notice(e.message, { source, line: e.line, level: 'error' }));
-    const cond: Array<{ active: boolean; taken: boolean; parent: boolean }> = []; // stack of { active, taken }
+    const cond: { active: boolean; taken: boolean; parent: boolean }[] = []; // stack of %if states
     const active = () => cond.every((c) => c.active);
     this.sourcing++;
     try {
@@ -408,7 +396,7 @@ export class Tmux {
         try {
           await this.execute(args, { source, line, origin, depth, fromConfig: true });
         } catch (err) {
-          this.notice(String((err as Error).message || err), { source, line, level: 'error' });
+          this.notice(errorMessage(err), { source, line, level: 'error' });
         }
       }
     } finally {
@@ -441,10 +429,10 @@ export class Tmux {
   async execute(args: CommandArgs, ctx: CommandContext = {}): Promise<unknown> {
     const name = String(args[0]);
     // command-alias takes priority over command names, like tmux.
-    const alias = ctx.aliasDepth! > 8 ? null : this.commandAlias(name);
+    const alias = (ctx.aliasDepth ?? 0) > 8 ? null : this.commandAlias(name);
     if (alias != null) {
       const { commands } = tokenize(alias, { ...this.env });
-      const list: CommandArgs[] = commands.map((c: { args: CommandArgs }) => c.args).filter((a: CommandArgs) => a.length);
+      const list: CommandArgs[] = commands.map((c) => c.args).filter((a) => a.length);
       if (list.length) list[list.length - 1] = list[list.length - 1].concat(args.slice(1));
       return this.runList(list, { ...ctx, aliasDepth: (ctx.aliasDepth || 0) + 1 });
     }
@@ -473,8 +461,8 @@ export class Tmux {
     try {
       r = await def.run(this, flags, rest, { ...ctx, invokedAs: name });
     } catch (err) {
-      const msg = `${def.name}: ${(err as Error).message || err}`;
-      if (ctx.print) throw new Error(msg);
+      const msg = `${def.name}: ${errorMessage(err)}`;
+      if (ctx.print) throw new Error(msg, { cause: err });
       if (ctx.fromConfig) this.notice(msg, { source: ctx.source, line: ctx.line, level: 'error' });
       else { this.ui.message(msg); this.log(msg, 'error'); }
       return false;
@@ -502,8 +490,8 @@ export class Tmux {
     if (!list || !list.some(Boolean) || this.hookDepth > 4) return;
     const srv = this.server;
     const prev = this.hookInfo;
-    const session: Session | null = (ctx.session as Session | null | undefined) || srv.session;
-    const window: Window | null = (ctx.window as Window | null | undefined) || (session && srv.activeWindow(session));
+    const session: Session | null = ctx.session || srv.session;
+    const window: Window | null = ctx.window || (session && srv.activeWindow(session));
     this.hookInfo = { hook: name, session, window, pane: ctx.pane ?? window?.active };
     this.hookDepth++;
     try {
@@ -537,7 +525,7 @@ export class Tmux {
   async fireEventHooks(before: HookSnapshot): Promise<void> {
     const srv = this.server;
     const after = this.hookSnapshot();
-    const fire: Array<[string, CommandContext]> = [];
+    const fire: [string, CommandContext][] = [];
     for (const [id, a] of after.sessions) {
       const b = before.sessions.get(id);
       if (!b) fire.push(['session-created', { session: a.s }]);
@@ -581,7 +569,7 @@ export class Tmux {
   // ----------------------------------------------------------------- shell
 
   /**
-   * Run a shell command string with the built-in shell subset (src/core/shell.js).
+   * Run a shell command string with the built-in shell subset (src/core/shell.ts).
    * Resolves to { code, out } or null when the command is outside the subset.
    */
   async shell(src: string, ctx: CommandContext = {}): Promise<ShellResult | null> {
@@ -595,17 +583,17 @@ export class Tmux {
       platform: this.platform,
       version: VERSION,
       note: (msg: string) => this.notice(msg, { source: ctx.source, line: ctx.line, level: 'info', key: 'sh:' + msg }),
-      tmux: async (argv: CommandArgs): Promise<ShellResult> => {
+      tmux: async (argv: string[]): Promise<ShellResult> => {
         let text = '';
         const print: PrintFn = (line) => { text += String(line) + '\n'; };
         try {
           const r = await this.execute(argv, { ...ctx, print, fromShell: true });
           return { code: r === false ? 1 : 0, out: text };
         } catch (err) {
-          return { code: 1, out: text, err: String((err as Error).message || err) };
+          return { code: 1, out: text, err: errorMessage(err) };
         }
       },
-    };
+    } satisfies ShellHost;
     try {
       return await new Shell(host).run(src);
     } catch (err) {
@@ -619,7 +607,7 @@ export class Tmux {
 
   /** Emit lines: to the calling shell (`tmux show ...` inside run-shell) or a list overlay. */
   output(ctx: CommandContext | null | undefined, lines: string[], title?: string): void {
-    if (ctx?.print) { lines.forEach((l) => ctx.print!(l)); return; }
+    if (ctx?.print) { for (const l of lines) ctx.print(l); return; }
     this.ui.showList({ title, lines });
   }
 
@@ -647,18 +635,18 @@ export class Tmux {
    * Build a lookup function for format expansion.
    * ctx: { session, window, pane (id) }
    */
-  lookup(ctx: CommandContext = {}): FormatLookup {
+  lookup(ctx: CommandContext = {}): TmuxLookup {
     const srv = this.server;
-    const session: Session | null = (ctx.session as Session | null | undefined) || srv.session;
-    const window: Window | null = (ctx.window as Window | null | undefined) || (session && srv.activeWindow(session));
+    const session: Session | null = ctx.session || srv.session;
+    const window: Window | null = ctx.window || (session && srv.activeWindow(session));
     const paneId = ctx.pane ?? window?.active;
-    const pane: ServerPane | undefined = srv.panes[paneId as number];
+    const pane: Pane | undefined = paneId != null ? srv.panes[paneId] : undefined;
     const winFlags = (w: Window) => {
       if (!session) return '';
       let f = '';
       if (w.id === session.active) f += '*';
       else if (w.id === session.last) f += '-';
-      if (marked != null && (panesInOrder(w.layout) as number[]).includes(marked)) f += 'M';
+      if (marked != null && panesInOrder(w.layout).includes(marked)) f += 'M';
       if (w.zoomed) f += 'Z';
       return f;
     };
@@ -674,7 +662,7 @@ export class Tmux {
     };
     const paneRect = () => (paneId != null ? rects().panes[paneId] : null);
     const cells = (px: number, c: number) => String(Math.max(1, Math.round(px / c)));
-    const urlPath = (p: ServerPane | undefined) => (p ? (p.kind === 'web' ? p.url : p.prefill || '') : '');
+    const urlPath = (p: Pane | undefined): string => (p ? (p.kind === 'web' ? p.url : p.prefill || '') : '');
     const fn = (name: string): FormatValue => {
       if (name.startsWith('#(')) {
         const cmd = name.slice(2, -1);
@@ -682,8 +670,9 @@ export class Tmux {
         this.notice(`#(${cmd.length > 60 ? cmd.slice(0, 57) + '...' : cmd}) — shell commands can't run in the browser`, { level: 'info', key: 'shell:' + cmd });
         return '';
       }
-      if (this.formatVars.has(name)) return this.formatVars.get(name)!(ctx);
-      if (name[0] === '@') return this.options[name];
+      const formatVar = this.formatVars.get(name);
+      if (formatVar) return formatVar(ctx);
+      if (name.startsWith('@')) return this.options[name];
       if (name.startsWith('hook')) {
         const h = this.hookInfo;
         switch (name) {
@@ -710,14 +699,14 @@ export class Tmux {
         case 'window_name': return window ? srv.windowName(window) : '';
         case 'window_flags': return window ? winFlags(window) : '';
         case 'window_raw_flags': return window ? winFlags(window) : '';
-        case 'window_active': return window && session && window.id === session.active ? '1' : '0';
-        case 'window_last_flag': return window && session && window.id === session.last ? '1' : '0';
+        case 'window_active': return session && window?.id === session.active ? '1' : '0';
+        case 'window_last_flag': return window && window.id === session?.last ? '1' : '0';
         case 'window_zoomed_flag': return window?.zoomed ? '1' : '0';
         case 'window_panes': return window ? panesInOrder(window.layout).length : 0;
         case 'window_bigger': return '0';
         case 'window_activity_flag': case 'window_bell_flag': case 'window_silence_flag': return '0';
         case 'window_start_flag': return window && session && srv.sortedWindows(session)[0] === window ? '1' : '0';
-        case 'window_end_flag': { const s = session && srv.sortedWindows(session); return window && s && s[s.length - 1] === window ? '1' : '0'; }
+        case 'window_end_flag': { const s = session && srv.sortedWindows(session); return window && s?.[s.length - 1] === window ? '1' : '0'; }
         case 'window_layout': return window?.layoutName || '';
         case 'pane_index': return window && paneId != null ? srv.paneIndex(window, paneId) : '';
         case 'pane_id': return paneId != null ? '%' + paneId : '';
@@ -750,7 +739,7 @@ export class Tmux {
         case 'window_height': case 'client_height': return cells(rects().g.rect.h, rects().ch);
         case 'pane_marked': return paneId != null && paneId === marked ? '1' : '0';
         case 'pane_marked_set': return marked != null ? '1' : '0';
-        case 'window_marked_flag': return window && marked != null && (panesInOrder(window.layout) as number[]).includes(marked) ? '1' : '0';
+        case 'window_marked_flag': return window && marked != null && panesInOrder(window.layout).includes(marked) ? '1' : '0';
         case 'pane_synchronized': return this.getOption('synchronize-panes') === 'on' ? '1' : '0';
         case 'pane_start_command': return pane?.kind === 'web' ? pane.url : '';
         case 'pane_start_path': return urlPath(pane);
@@ -802,13 +791,13 @@ export class Tmux {
     fn.loop = (kind: string, flags = ''): FormatLoopItem[] => {
       const items: FormatLoopItem[] = [];
       if (kind === 'S' || kind === 'L') {
-        let list: Session[] = kind === 'L' ? [srv.session].filter(Boolean) as Session[] : srv.sessions.slice();
+        const list: Session[] = kind === 'L' ? [srv.session].filter((s): s is Session => s != null) : srv.sessions.slice();
         if (flags.includes('n')) list.sort((a, b) => a.name.localeCompare(b.name));
         else list.sort((a, b) => a.id - b.id);
         for (const s of list) items.push({ lookup: this.lookup({ session: s, loop: 'S' }), current: s === srv.session });
       } else if (kind === 'W') {
         if (!session) return [];
-        let list: Window[] = srv.sortedWindows(session);
+        const list: Window[] = srv.sortedWindows(session);
         if (flags.includes('n')) list.sort((a, b) => srv.windowName(a).localeCompare(srv.windowName(b)));
         for (const w of list) items.push({ lookup: this.lookup({ session, window: w, loop: 'W' }), current: w.id === session.active });
       } else if (kind === 'P') {
@@ -820,19 +809,19 @@ export class Tmux {
     };
     fn.exists = (kind: string, nm: string): boolean => {
       if (kind === 's') return !!srv.sessionByName(nm);
-      return !!(session && session.windows.some((w) => srv.windowName(w) === nm));
+      return !!session?.windows.some((w) => srv.windowName(w) === nm);
     };
     return fn;
   }
 
   /** Expand a format with strftime, like status-left/right. */
-  expand(fmt: unknown, ctx: CommandContext = {}, { time = false }: { time?: boolean } = {}): string {
+  expand(fmt: Stringish, ctx: CommandContext = {}, { time = false }: { time?: boolean } = {}): string {
     let f = String(fmt ?? '');
     if (time) f = strftime(f, this.now());
     return expandFormat(f, this.lookup(ctx));
   }
 
-  expandPlain(fmt: unknown, ctx: CommandContext = {}, opts?: { time?: boolean }): string {
+  expandPlain(fmt: Stringish, ctx: CommandContext = {}, opts?: { time?: boolean }): string {
     return plainText(this.expand(fmt, ctx, opts));
   }
 
@@ -846,15 +835,27 @@ export class Tmux {
 /** The tmux version this emulates (`#{version}`, `tmux -V`). */
 export const VERSION = '3.4';
 
+/** `navigator` with the (Chromium-only) User-Agent Client Hints platform; absent outside browsers. */
+type NavigatorWithUAData = Navigator & { userAgentData?: { platform?: string } };
+
 function guessPlatform(): string {
-  const p = String((globalThis.navigator as (Navigator & { userAgentData?: { platform?: string } }) | undefined)?.userAgentData?.platform || globalThis.navigator?.platform || '');
+  const nav: NavigatorWithUAData | undefined = globalThis.navigator;
+  const p = String(nav?.userAgentData?.platform || nav?.platform || '');
   if (/mac/i.test(p)) return 'Darwin';
   if (/win/i.test(p)) return 'MINGW64_NT';
   return 'Linux';
 }
 
+/** Text of a caught error: its message, or the thrown value itself when it has none. */
+function errorMessage(err: unknown): string {
+  if (typeof err === 'object' && err !== null && 'message' in err && typeof err.message === 'string' && err.message) return err.message;
+  return String(err);
+}
+
+/** A UI adapter whose methods do nothing (prompts cancel, confirms decline). */
 export function nullUi(): Ui {
-  const noop = () => {};
+  const noop = (): void => {};
+  // The Proxy supplies every Ui method on access, so the empty target never needs to be a real Ui.
   return new Proxy({} as Ui, {
     get: (_, prop) => {
       if (prop === 'prompt') return async () => null;
