@@ -41,7 +41,8 @@ export interface ParsedArgs {
 }
 
 const VAR_RE = /^[A-Za-z_][A-Za-z0-9_]*/;
-const DQ_ESCAPES: Record<string, string> = { n: '\n', t: '\t', r: '\r', e: '\x1b', '"': '"', '\\': '\\', $: '$' };
+const ASSIGN_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const DQ_ESCAPES: Readonly<Record<string, string>> = { n: '\n', t: '\t', r: '\r', e: '\x1b', '"': '"', '\\': '\\', $: '$' };
 
 function expandVar(text: string, i: number, env: Env): [string, number] | null {
   // text[i] === '$'. Returns [value, nextIndex] or null when not a variable.
@@ -92,15 +93,13 @@ export function tokenize(text: string, env: Env = {}): TokenizeResult {
   const endCommand = () => {
     pushWord();
     if (!args.length) return;
-    const first = args[0];
-    if (args.length === 1 && typeof first === 'string' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(first)) {
-      const eq = first.indexOf('=');
-      env[first.slice(0, eq)] = first.slice(eq + 1);
-      commands.push({ args: [], assign: first.slice(0, eq), line: cmdLine });
-    } else if (first === '%hidden' && args.length === 2 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(args[1] as string)) {
-      const eq = (args[1] as string).indexOf('=');
-      env[(args[1] as string).slice(0, eq)] = (args[1] as string).slice(eq + 1);
-      commands.push({ args: [], assign: (args[1] as string).slice(0, eq), line: cmdLine });
+    // A plain `NAME=value` word, alone or after %hidden, is an assignment. Anything
+    // else (including `%hidden { ... }`) is an ordinary command, as in tmux.
+    const assignment = args.length === 1 ? args[0] : args.length === 2 && args[0] === '%hidden' ? args[1] : null;
+    if (typeof assignment === 'string' && ASSIGN_RE.test(assignment)) {
+      const eq = assignment.indexOf('=');
+      env[assignment.slice(0, eq)] = assignment.slice(eq + 1);
+      commands.push({ args: [], assign: assignment.slice(0, eq), line: cmdLine });
     } else {
       commands.push({ args, line: cmdLine });
     }
@@ -137,7 +136,6 @@ export function tokenize(text: string, env: Env = {}): TokenizeResult {
       const end = text.indexOf("'", i + 1);
       if (end === -1) {
         errors.push({ line, message: 'unterminated single quote' });
-        i = n;
         break;
       }
       const chunk = text.slice(i + 1, end);
@@ -212,7 +210,7 @@ export function tokenize(text: string, env: Env = {}): TokenizeResult {
 
 /** A `{ ... }` argument: the raw command text inside the braces. */
 export class BlockArg {
-  declare text: string;
+  declare readonly text: string;
   constructor(text: string) { this.text = text; }
   toString(): string { return this.text; }
 }
@@ -228,7 +226,7 @@ export function toCommandList(value: unknown, env: Env = {}): CommandList {
   }
   if (Array.isArray(value)) {
     if (value.length === 1 && value[0] instanceof BlockArg) return toCommandList(value[0], env);
-    return splitOnSemicolons(value as Arg[]);
+    return splitOnSemicolons(value);
   }
   return [];
 }
@@ -268,7 +266,7 @@ export function parseArgs(args: readonly Arg[], spec = ''): ParsedArgs {
   let i = 0;
   for (; i < args.length; i++) {
     const a = args[i];
-    if (typeof a !== 'string' || a[0] !== '-' || a.length < 2) break;
+    if (typeof a !== 'string' || !a.startsWith('-') || a.length < 2) break;
     if (a === '--') { i++; break; }
     if (/^-\d/.test(a)) break; // negative number argument
     for (let j = 1; j < a.length; j++) {
@@ -288,10 +286,10 @@ export function parseArgs(args: readonly Arg[], spec = ''): ParsedArgs {
 }
 
 /** Quote an argument the way `tmux list-keys` prints it. */
-export function quoteArg(s: string | number | boolean | null | undefined): string {
-  s = String(s);
+export function quoteArg(value: string | number | boolean | null | undefined): string {
+  const s = String(value);
   if (s === '') return "''";
-  if (/^[\w@%:.,/=+^~!?<>[\]-]+$/.test(s) && !/^[#~]/.test(s)) return s;
+  if (/^[\w@%:.,/=+^~!?<>[\]-]+$/.test(s) && !s.startsWith('#') && !s.startsWith('~')) return s;
   if (!s.includes("'")) return `'${s}'`;
   return `"${s.replace(/(["\\$])/g, '\\$1')}"`;
 }
