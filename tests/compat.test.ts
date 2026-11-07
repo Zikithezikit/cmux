@@ -9,30 +9,21 @@ import { Tpm, memoryStorage } from '../src/tpm/tpm.js';
 import { runShell } from '../src/core/shell.js';
 import { resolveCommand } from '../src/core/commands.js';
 import { panesInOrder } from '../src/core/layout.js';
-import type { Server } from '../src/core/server.js';
-import type { Notice, Pane, Ui } from '../src/core/types.js';
+import type { TpmFetch, TpmTimers } from '../src/tpm/tpm.js';
+import type { Ui } from '../src/core/types.js';
 
 /** A stub UI: records messages; any method it doesn't define is a no-op. */
 type StubUi = Ui & { messages: string[] };
 type StubOverrides = { [K in keyof Ui]?: (...args: never[]) => unknown };
 
-/** The engine as these tests use it (fields Tmux and Server set up in their constructors). */
-type Engine = Tmux & {
-  ui: StubUi;
-  server: Server & { panes: Record<number, Pane> };
-  notices: Notice[];
-  env: Record<string, string>;
-  buffers: { name: string; data: string }[];
-  platform: string;
-  handleKey(ev: { table: string; key: string; prefix?: boolean }): Promise<unknown>;
-  expandPlain(fmt: string): string;
-};
+/** The engine with the stub UI. */
+type Engine = Tmux & { ui: StubUi };
 
 interface MenuItem { key?: string; label?: string; separator?: boolean; disabled?: boolean }
 interface MenuOpts { title: string; items: MenuItem[] }
 interface PopupOpts { url?: string; width?: string; title?: string }
 
-const timers = { setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout };
+const timers = { setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout } as unknown as TpmTimers;
 
 function stubUi(extra: StubOverrides = {}) {
   const messages: string[] = [];
@@ -50,7 +41,7 @@ function stubUi(extra: StubOverrides = {}) {
 async function boot(conf: string, { ui = stubUi() }: { ui?: StubUi } = {}) {
   const t = new Tmux({ ui }) as Engine;
   t.platform = 'Linux';
-  const tpm = new Tpm(t, { storage: memoryStorage(), timers, fetchImpl: async () => ({ ok: false }) });
+  const tpm = new Tpm(t, { storage: memoryStorage(), timers, fetchImpl: (async () => ({ ok: false })) as unknown as TpmFetch });
   await t.loadDefaults();
   t.server.newSession({});
   if (conf) await t.runConfig(conf, { source: 'test.conf' });

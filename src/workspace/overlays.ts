@@ -6,60 +6,16 @@ import { colourToCss } from '../core/format.js';
 import * as L from '../core/layout.js';
 import { quoteArg } from '../core/parser.js';
 import { toUrl } from '../core/commands.js';
-import type { LogEntry, Notice, Pane, Rect, Session, Window } from '../core/types.js';
-import type { StatusOverlay, StatusServer, StatusTmux } from './status.js';
+import type { Rect, Session, Window } from '../core/types.js';
+import type { Tmux } from '../core/tmux.js';
+import type { Server } from '../core/server.js';
+import type { StatusOverlay } from './status.js';
 
-/** What the overlays need from the server. */
-export interface OverlayServer extends StatusServer {
-  sessions: Session[];
-  currentId: number | null;
-  panes: Record<number, Pane>;
-  readonly window: Window | null;
-  windowName(window: Window): string;
-  paneIndex(window: Window, paneId: number): number;
-  switchTo(session: Session): void;
-  selectWindow(session: Session, window: Window): void;
-  selectPane(window: Window, paneId: number): void;
-  changed(reason?: string): void;
-}
+/** The server, as the overlays see it. */
+export type OverlayServer = Server;
 
-interface PluginMeta {
-  error?: string;
-  url?: string;
-  fullName?: string;
-  description?: string | null;
-  stars?: number;
-  archived?: boolean;
-}
-
-interface PluginReportRow {
-  repo: string;
-  branch?: string | null;
-  source?: string;
-  line?: number;
-  status: string;
-  description: string;
-  options: string[];
-  meta: PluginMeta | null;
-}
-
-interface PluginReporter {
-  report(): PluginReportRow[];
-  unclaimedOptions(): string[];
-  fetchMetadata(opts?: { force?: boolean }): Promise<unknown>;
-}
-
-/** What the overlays need from the tmux engine. */
-export interface OverlayTmux extends StatusTmux {
-  server: OverlayServer;
-  options: Record<string, string>;
-  optionOrigins: Record<string, string>;
-  messages: LogEntry[];
-  notices: Notice[];
-  plugins: PluginReporter | null;
-  expandPlain(fmt: string, ctx?: Record<string, unknown>, opts?: { time?: boolean }): string;
-  runString(str: string): Promise<unknown>;
-}
+/** The tmux engine, as the overlays see it. */
+export type OverlayTmux = Tmux;
 
 export interface ConfigInfo {
   label: string;
@@ -225,17 +181,13 @@ interface PaneTreeRow extends TreeRowBase {
 
 type TreeRow = SessionTreeRow | WindowTreeRow | PaneTreeRow;
 
-interface CtmuxKeysApi {
-  eventToKey(e: KeyboardEvent): string | null;
-}
-
 type ElLeaf = Node | string | number | null | undefined;
 type ElChild = ElLeaf | ElLeaf[];
 type ElProps = Record<string, unknown>;
 
 const toPopupUrl = (v: string, t: OverlayTmux): string => toUrl(v, t.getOption('@ctmux-search-url'));
 
-const { eventToKey } = (globalThis as unknown as { CtmuxKeys: CtmuxKeysApi }).CtmuxKeys;
+const { eventToKey } = globalThis.CtmuxKeys;
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, props: ElProps = {}, ...children: ElChild[]): HTMLElementTagNameMap[K] => {
   const e = document.createElement(tag);

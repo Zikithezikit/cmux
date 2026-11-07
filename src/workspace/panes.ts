@@ -25,7 +25,7 @@ export interface PaneEls {
   input?: HTMLInputElement | null;
 }
 
-/** The server surface PaneView uses (Server is not typed yet). */
+/** The server surface PaneView uses. */
 export interface PaneViewServer {
   readonly window: TmuxWindow | null;
   panes: Record<number, Pane>;

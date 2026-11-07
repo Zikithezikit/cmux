@@ -2,33 +2,14 @@
 // message / prompt modes that temporarily take over the line.
 
 import { toRuns, truncateRuns, parseStyle, applyStyle, styleToCss } from '../core/format.js';
-import type { Session, Window } from '../core/types.js';
+import type { Run, Style } from '../core/format.js';
+import type { Tmux } from '../core/tmux.js';
 
-/** A resolved style (as produced by format.js parseStyle/applyStyle). */
-export interface RunStyle {
-  fg: string | null;
-  bg: string | null;
-  attrs: Record<string, boolean>;
-}
+/** A resolved style (format.ts parseStyle/applyStyle). */
+export type RunStyle = Style;
 
-/** A run of text in one style (format.js toRuns). */
-export interface StyledRun {
-  text: string;
-  style: RunStyle;
-}
-
-/** What the status line needs from the server. */
-export interface StatusServer {
-  readonly session: Session | null;
-  sortedWindows(session: Session): Window[];
-}
-
-/** What the status line needs from the tmux engine. */
-export interface StatusTmux {
-  server: StatusServer;
-  getOption(name: string): string;
-  expand(fmt: string, ctx?: Record<string, unknown>, opts?: { time?: boolean }): string;
-}
+/** A run of text in one style (format.ts toRuns). */
+export type StyledRun = Run;
 
 /** What temporarily takes over the status line: a message or a prompt. */
 export interface StatusOverlay {
@@ -41,14 +22,14 @@ export interface StatusOverlay {
 const PL: Record<string, string> = { '': 'r', '': 'l', '': 'rr', '': 'lr', '': 'rt', '': 'lt', '': 'rt', '': 'lt' };
 const PL_RE = /[-]/;
 
-export function baseStyle(t: StatusTmux) {
+export function baseStyle(t: Tmux) {
   return parseStyle(t.getOption('status-style'));
 }
 
 /** Append runs to `el` as styled spans. */
 export function renderRuns(el: HTMLElement, runs: StyledRun[]): void {
   for (const r of runs) {
-    const css: Partial<CSSStyleDeclaration> = styleToCss(r.style);
+    const css = styleToCss(r.style);
     const parts = PL_RE.test(r.text) ? r.text.split(/([-])/) : [r.text];
     for (const part of parts) {
       if (!part) continue;
@@ -81,7 +62,7 @@ function segment(cls: string, runs: StyledRun[]): HTMLElement {
  * Render the status line into `el`.
  * `overlay` is null, { message, style } or { prompt: HTMLElement }.
  */
-export function renderStatus(t: StatusTmux, el: HTMLElement, overlay: StatusOverlay | null): void {
+export function renderStatus(t: Tmux, el: HTMLElement, overlay: StatusOverlay | null): void {
   const app = document.getElementById('app')!;
   const pos = t.getOption('status-position') === 'top' ? 'top' : 'bottom';
   app.classList.toggle('status-top', pos === 'top');
