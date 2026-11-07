@@ -439,6 +439,7 @@ def('select-window', 'selectw', 'lnpTt:', (t, f, a, ctx) => {
   srv.switchTo(r.session);
   srv.selectWindow(r.session, r.window);
   t.ui.focusPane?.();
+  return undefined;
 });
 
 function cycleWindow(t: Tmux, delta: number) {
@@ -630,6 +631,7 @@ def('select-pane', 'selectp', 'DdegLlMmP:RT:t:UZ', (t, f, a, ctx) => {
     return;
   }
   selectPane(t, r.session, r.window, r.pane);
+  return undefined;
 });
 
 def('last-pane', 'lastp', 'det:Z', (t, f, a, ctx) => {
@@ -812,8 +814,8 @@ def('list-windows', 'lsw', 'aF:f:t:', (t, f, a, ctx) => {
 def('list-panes', 'lsp', 'asF:f:t:', (t, f, a, ctx) => {
   const r = target(t, f.t, 'window', ctx);
   const fmt = (f.F as string) || '#{pane_index}: #{pane_title} #{pane_current_path}#{?pane_active, (active),}';
-  const wins: [Session, Window][] = f.a ? t.server.sessions.flatMap((s) => t.server.sortedWindows(s).map((w) => [s, w]))
-    : f.s ? t.server.sortedWindows(r.session).map((w) => [r.session, w]) : [[r.session, r.window]];
+  const wins: [Session, Window][] = f.a ? t.server.sessions.flatMap((s) => t.server.sortedWindows(s).map((w): [Session, Window] => [s, w]))
+    : f.s ? t.server.sortedWindows(r.session).map((w): [Session, Window] => [r.session, w]) : [[r.session, r.window]];
   const lines: string[] = [];
   for (const [session, window] of wins) {
     for (const id of L.panesInOrder(window.layout)) {
@@ -828,7 +830,7 @@ def('list-panes', 'lsp', 'asF:f:t:', (t, f, a, ctx) => {
 def('choose-tree', ['choose-window', 'choose-session'], 'F:f:GK:NO:rst:wyZ', (t, f, a, ctx) => {
   const mode = f.s || ctx.invokedAs === 'choose-session' ? 'session'
     : f.w || ctx.invokedAs === 'choose-window' ? 'window' : 'tree';
-  t.ui.chooseTree({ mode, filter: f.f || '', zoom: !!f.Z, template: a[0] != null ? argToString(a[0]) : null });
+  t.ui.chooseTree({ mode, filter: (f.f as string) || '', zoom: !!f.Z, template: a[0] != null ? argToString(a[0]) : null });
 });
 
 def('choose-client', null, 'F:f:K:NO:rt:yZ', (t) => t.ui.message('Only one client (this tab) is attached'));
@@ -865,7 +867,7 @@ def('command-prompt', null, '1beFiklNI:p:t:T:W', async (t, f, a, ctx) => {
     : [template ? `(${cmdName}) ` : ':'];
   const inputs = f.I != null ? splitList(f.I).map((s) => t.expandPlain(s, ctx)) : [];
   const answers = await t.ui.prompt({
-    prompts, inputs, single: !!f[1], numeric: !!f.N, type: f.T || 'command', command: !template,
+    prompts, inputs, single: !!f[1], numeric: !!f.N, type: (f.T as string) || 'command', command: !template,
   });
   if (!answers) return;
   if (!template) {
@@ -880,7 +882,7 @@ def('command-prompt', null, '1beFiklNI:p:t:T:W', async (t, f, a, ctx) => {
 def('confirm-before', 'confirm', 'bc:p:t:y', async (t, f, a, ctx) => {
   const cmd = a.length === 1 ? argToString(a[0]).replace(/^\{ (.*) \}$/s, '$1') : asCommandString(a);
   const prompt = f.p != null ? t.expandPlain(f.p as string, ctx) : `Confirm '${cmd}'? (y/n)`;
-  const ok = await t.ui.confirm(prompt, { defaultYes: !!f.y, confirmKey: f.c || 'y' });
+  const ok = await t.ui.confirm(prompt, { defaultYes: !!f.y, confirmKey: (f.c as string) || 'y' });
   if (ok) await t.runString(cmd, ctx);
 });
 
@@ -1002,7 +1004,7 @@ def('display-menu', 'menu', 'b:c:C:H:MOs:S:t:T:x:y:', async (t, f, a, ctx) => {
   if (t.ui.menu) {
     chosen = await t.ui.menu({ title, items, start: f.C != null ? Number(f.C) : 0, x: f.x, y: f.y });
   } else {
-    const v = await t.ui.pick({ title: title || 'menu', fuzzy: false, items: selectable.map((x) => ({ label: x.key ? `(${x.key}) ${x.label}` : x.label, value: items.indexOf(x) })) });
+    const v = await t.ui.pick({ title: title || 'menu', fuzzy: false, items: selectable.map((x) => ({ label: x.key ? `(${x.key}) ${x.label}` : x.label ?? '', value: items.indexOf(x) })) });
     chosen = v == null ? null : items[v as number];
   }
   if (!chosen || chosen.disabled || chosen.separator || !chosen.command) return;

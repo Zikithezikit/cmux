@@ -9,7 +9,7 @@
 import { toCommandList } from '../core/parser.js';
 import { registerCommand } from '../core/commands.js';
 import { EMULATORS } from './plugins/index.js';
-import type { CommandContext, Flags, KeyValueStorage } from '../core/types.js';
+import type { CommandContext, Flags, KeyValueStorage, LogLevel } from '../core/types.js';
 import type { Tmux, FormatVarFn, ShellVarFn, NoticeOptions, BindOptions, PasteBuffer } from '../core/tmux.js';
 import type { Server, Snapshot } from '../core/server.js';
 
@@ -111,7 +111,7 @@ export interface PluginApi {
   onStartup(fn: StartupHook): void;
   storage: KeyValueStorage;
   fetch: TpmFetch;
-  notice(msg: string, level?: string): void;
+  notice(msg: string, level?: LogLevel): void;
   refresh: () => void;
 }
 
@@ -309,7 +309,7 @@ export class Tpm {
 
   async loadMetaCache() {
     try {
-      this.meta = (await this.storage.get(META_KEY)) || {};
+      this.meta = (await this.storage.get<Record<string, PluginMeta>>(META_KEY)) || {};
     } catch { this.meta = {}; }
     return this.meta;
   }
@@ -359,7 +359,7 @@ export class Tpm {
 export function memoryStorage(): KeyValueStorage {
   const m = new Map<string, unknown>();
   return {
-    async get(k) { return m.get(k); },
+    async get<T>(k: string) { return m.get(k) as T | undefined; },
     async set(k, v) { m.set(k, v); },
     async remove(k) { m.delete(k); },
   };

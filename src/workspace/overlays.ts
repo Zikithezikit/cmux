@@ -6,7 +6,12 @@ import { colourToCss } from '../core/format.js';
 import * as L from '../core/layout.js';
 import { quoteArg } from '../core/parser.js';
 import { toUrl } from '../core/commands.js';
-import type { Rect, Session, Window } from '../core/types.js';
+import type {
+  Rect, Session, Window,
+  MessageOptions, PromptOptions, ConfirmOptions, ShowListOptions, PickItem, PickOptions, PickResult, MenuItem, MenuOptions, PopupDimension, PopupOptions, ChooseTreeOptions, DisplayPanesOptions,
+} from '../core/types.js';
+
+export type { MessageOptions, PromptOptions, ConfirmOptions, ShowListOptions, PickItem, PickOptions, PickResult, MenuItem, MenuOptions, PopupDimension, PopupOptions, ChooseTreeOptions, DisplayPanesOptions };
 import type { Tmux } from '../core/tmux.js';
 import type { Server } from '../core/server.js';
 import type { StatusOverlay } from './status.js';
@@ -69,85 +74,6 @@ export interface ListOptions<R extends ListRow | string> {
   zoom?: boolean;
   initial?: number;
   filter?: string;
-}
-
-export interface MessageOptions {
-  duration?: number;
-}
-
-export interface PromptOptions {
-  prompts: string[];
-  inputs?: string[];
-  single?: boolean;
-  numeric?: boolean;
-  command?: boolean;
-}
-
-export interface ConfirmOptions {
-  defaultYes?: boolean;
-  confirmKey?: string;
-}
-
-export interface ShowListOptions {
-  title: string;
-  lines: string[];
-  filterable?: boolean;
-}
-
-export interface PickItem<V = unknown> {
-  label: string;
-  value: V;
-}
-
-export interface PickOptions<V = unknown> {
-  title: string;
-  items: PickItem<V>[];
-  fuzzy?: boolean;
-  hint?: string;
-}
-
-/** A pick result: the value, or { value, key } when chosen with C-v/C-s/C-t. */
-export type PickResult<V = unknown> = V | { value: V; key: string } | null;
-
-export interface MenuItem {
-  label?: string;
-  key?: string;
-  separator?: boolean;
-  disabled?: boolean;
-  command?: unknown;
-}
-
-export interface MenuOptions<T extends MenuItem = MenuItem> {
-  title?: string;
-  items: T[];
-  start?: number;
-  x?: unknown;
-  y?: unknown;
-}
-
-/** Popup sizes/positions: cells, "N%" or "C" (centre). */
-export type PopupDimension = string | number | boolean | null | undefined;
-
-export interface PopupOptions {
-  url?: string | null;
-  text?: string | null;
-  width?: PopupDimension;
-  height?: PopupDimension;
-  x?: PopupDimension;
-  y?: PopupDimension;
-  title?: string;
-  border?: unknown;
-}
-
-export interface ChooseTreeOptions {
-  mode?: 'tree' | 'session' | 'window' | (string & {});
-  filter?: string;
-  zoom?: boolean;
-  template?: string | null;
-}
-
-export interface DisplayPanesOptions {
-  time: number;
 }
 
 export interface FuzzyMatch {

@@ -10,12 +10,17 @@
     "test": "npm run -s build && node --test tests/*.test.js",
     "icons": "npm run -s build && node tools/make-icons.js",
     "e2e": "npm run -s build && node tests/e2e/smoke.mjs",
-    "package": "npm run -s build && sh tools/package.sh"
+    "package": "npm run -s build && sh tools/package.sh",
+    "lint": "eslint ."
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/chrome": "^0.3.7",
     "@types/node": "^22.20.5",
+    "eslint": "^10.14.0",
+    "globals": "^17.14.0",
     "playwright-core": "1.55",
-    "typescript": "^7.0.2"
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.72.1"
   }
 }

@@ -45,7 +45,7 @@ export interface BindOptions {
 export interface NoticeOptions {
   source?: string;
   line?: number;
-  level?: LogLevel | string;
+  level?: LogLevel;
   key?: string;
 }
 
@@ -239,7 +239,7 @@ export class Tmux {
 
   // -------------------------------------------------------------- logging
 
-  log(message: string, level: LogLevel | string = 'info'): void {
+  log(message: string, level: LogLevel = 'info'): void {
     this.messages.push({ time: Date.now(), level, message });
     if (this.messages.length > 500) this.messages.shift();
   }

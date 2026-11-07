@@ -23,7 +23,7 @@ CHROME_CONFIG ?= $(HOME)/.config/google-chrome
 USERNS_RESTRICTED := $(shell cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)
 RUN_FLAGS ?= $(if $(and $(filter 1,$(USERNS_RESTRICTED)),$(findstring ms-playwright,$(CHROMIUM))),--no-sandbox)
 
-.PHONY: help install build typecheck test e2e check icons package screenshots run app info clean distclean
+.PHONY: help install build typecheck lint test e2e check icons package screenshots run app info clean distclean
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z0-9-]+:.*## / {printf "  \033[32mmake %-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -42,13 +42,16 @@ build: node_modules ## Compile the TypeScript sources in place (src/**/*.ts -> .
 typecheck: node_modules ## Type-check everything without emitting
 	npm run -s typecheck
 
+lint: node_modules ## Lint with ESLint + typescript-eslint (type-aware rules)
+	npm run -s lint
+
 test: node_modules ## Build, then run the unit tests (Node, no browser)
 	npm test
 
 e2e: node_modules ## Drive the extension in Chromium (SCREENSHOTS=dir keeps screenshots)
 	CHROME_PATH="$(CHROMIUM)" npm run -s e2e
 
-check: typecheck test e2e ## Type-check + unit tests + browser test
+check: typecheck lint test e2e ## Type-check + lint + unit tests + browser test
 
 icons: node_modules ## Regenerate icons/*.png
 	npm run -s icons
