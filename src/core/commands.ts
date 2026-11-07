@@ -1,4 +1,3 @@
-// @ts-nocheck
 // tmux command implementations. Each entry: { name, alias, flags, run(t, f, a, ctx) }
 // where `t` is the Tmux engine, `f` parsed flags, `a` positional args and
 // `ctx` the command context ({ source, line, fromConfig, fromKey, pane, ... }).
@@ -8,39 +7,167 @@ import { resolveTarget } from './target.js';
 import { toCommandList, argToString, quoteArg, formatCommandList } from './parser.js';
 import { DEFAULT_OPTIONS, FLAG_OPTIONS, ARRAY_OPTIONS, EVENT_HOOKS as EVENT_HOOK_NAMES, KNOWN_UNFIRED_HOOKS } from './defaults.js';
 import { paneShortName } from './server.js';
+import type { Tmux } from './tmux.js';
+import type { Server } from './server.js';
+import type { BlockArg } from './parser.js';
+import type { Flags, Geometry, LayoutNode, LayoutRects, Pane, Session, Target, Ui, UiOptions, Window } from './types.js';
 
-export const COMMANDS = new Map();
-const ALIASES = new Map();
+/** A positional command argument: a plain word or a `{ ... }` block. */
+export type CommandArg = string | BlockArg;
 
-export function registerCommand(def) {
-  COMMANDS.set(def.name, def);
-  for (const a of [].concat(def.alias || [])) ALIASES.set(a, def.name);
+/** A command list: one array of arguments per command. */
+export type CommandList = CommandArg[][];
+
+/**
+ * The context a command runs in. Same as CommandContext in types.ts, except
+ * that `print` is the line sink the shell's `tmux ...` passes in.
+ */
+export interface CommandRunContext {
+  source?: string;
+  line?: number;
+  fromConfig?: boolean;
+  fromKey?: boolean;
+  fromShell?: boolean;
+  /** Write output lines here (and throw errors) instead of showing them. */
+  print?: (line: string) => void;
+  invokedAs?: string;
+  session?: Session | number | null;
+  window?: Window | number | null;
+  pane?: number | null;
+  depth?: number;
+  aliasDepth?: number;
+  origin?: string;
+  [key: string]: unknown;
 }
 
-export function resolveCommand(name) {
+/** A registry entry. */
+export interface CommandDef {
+  name: string;
+  alias: string | string[] | null;
+  /** getopt-style flag spec, e.g. "aFgt:". */
+  flags: string;
+  run(t: Tmux, f: Flags, a: CommandArg[], ctx: CommandRunContext): unknown;
+}
+
+export interface KeyBinding {
+  key: string;
+  commands: CommandList;
+  repeat: boolean;
+  note: string;
+  origin: string;
+}
+
+export interface PasteBuffer {
+  name: string;
+  data: string;
+  time: number;
+}
+
+export interface WaitChannel {
+  waiters: Array<(value?: unknown) => void>;
+  woken: boolean;
+  locked: boolean;
+  lockers: Array<(value?: unknown) => void>;
+}
+
+export interface MenuItem {
+  separator?: boolean;
+  label?: string;
+  key?: string;
+  disabled?: boolean;
+  command?: string;
+}
+
+/** A pane as the server stores it. */
+type EnginePane = Pane & { manualTitle?: boolean; mode?: string | null };
+
+/** A window as the server stores it (`prevLayout` is set by select-layout). */
+type EngineWindow = Window & { prevLayout?: LayoutNode };
+
+/** The parts of the TPM plugin host that commands use. */
+interface PluginHost {
+  declare(value: string, ctx?: CommandRunContext, legacyList?: boolean): void;
+  handleRun(cmd: string, ctx?: CommandRunContext): Promise<boolean>;
+}
+
+/** Server state assigned in its constructor (not yet declared on the class). */
+interface ServerState {
+  sessions: Session[];
+  lastSessionId: number | null;
+  panes: Record<number, EnginePane>;
+  marked: number | null;
+  freeIndex(session: Session, from?: number): number;
+  sortedWindows(session: Session): Window[];
+  newWindow(session: Session, opts?: { url?: string; prefill?: string; name?: string; index?: number; after?: boolean; select?: boolean }): Window;
+  breakPane(paneId: number, opts?: { name?: string; select?: boolean; index?: number; after?: boolean }): Window | null;
+}
+
+/** UI adapter as commands call it. */
+type EngineUi = Omit<Ui, 'focusPane' | 'configReloaded' | 'prompt'> & {
+  focusPane(paneId?: number): void;
+  configReloaded(source?: string): void;
+  prompt(opts: UiOptions): Promise<string[] | null>;
+};
+
+/** Engine state assigned in Tmux's constructor (not yet declared on the class). */
+interface TmuxState {
+  ui: EngineUi;
+  server: ServerState & Server;
+  options: Record<string, string>;
+  optionOrigins: Record<string, string>;
+  tables: Map<string, Map<string, KeyBinding>>;
+  env: Record<string, string>;
+  buffers: PasteBuffer[];
+  keyTable: string;
+  plugins: PluginHost | null;
+  /** name -> sparse array of command lists */
+  hooks: Record<string, CommandList[]>;
+  waitChannels: Map<string, WaitChannel>;
+  loadFile(path: string): Promise<string>;
+  expandPlain(fmt: string, ctx?: object, opts?: { time?: boolean }): string;
+  notice(message: string, opts?: { source?: string; line?: number; level?: string; key?: string }): void;
+  arrayOption(base: string): [number, string][];
+}
+
+/** The engine as commands see it. */
+type Engine = TmuxState & Tmux;
+
+type ResolveTarget = (server: unknown, spec: string | true | undefined, kind: string, ctx?: object, geometry?: Geometry | null) => Target | null;
+
+type RunFn = (t: Engine, f: Flags, a: CommandArg[], ctx: CommandRunContext) => unknown;
+
+export const COMMANDS = new Map<string, CommandDef>();
+const ALIASES = new Map<string, string>();
+
+export function registerCommand(def: CommandDef) {
+  COMMANDS.set(def.name, def);
+  for (const a of ([] as string[]).concat(def.alias || [])) ALIASES.set(a, def.name);
+}
+
+export function resolveCommand(name: string) {
   if (COMMANDS.has(name)) return COMMANDS.get(name);
-  if (ALIASES.has(name)) return COMMANDS.get(ALIASES.get(name));
+  if (ALIASES.has(name)) return COMMANDS.get(ALIASES.get(name)!);
   // tmux accepts unambiguous prefixes of command names.
   const matches = [...COMMANDS.keys()].filter((n) => n.startsWith(name));
   return matches.length === 1 ? COMMANDS.get(matches[0]) : null;
 }
 
-const def = (name, alias, flags, run) => registerCommand({ name, alias, flags, run });
+const def = (name: string, alias: string | string[] | null, flags: string, run: RunFn) => registerCommand({ name, alias, flags, run });
 
 // ------------------------------------------------------------------ helpers
 
-function target(t, spec, kind, ctx) {
-  const r = resolveTarget(t.server, spec, kind, ctx, t.ui.geometry());
+function target(t: Engine, spec: string | true | undefined, kind: string, ctx: CommandRunContext): Target {
+  const r = (resolveTarget as unknown as ResolveTarget)(t.server, spec, kind, ctx, t.ui.geometry());
   if (!r) throw new Error(`can't find ${kind}: ${spec}`);
   return r;
 }
 
-const truthyFmt = (v) => v !== '' && v !== '0';
+const truthyFmt = (v: string) => v !== '' && v !== '0';
 
-const isFlag = (v) => ['on', 'yes', '1', 'true'].includes(String(v).toLowerCase());
+const isFlag = (v: unknown) => ['on', 'yes', '1', 'true'].includes(String(v).toLowerCase());
 
 /** Interpret what would be a shell command / start directory as something to open. */
-export function toUrl(input, searchUrl = DEFAULT_OPTIONS['@ctmux-search-url']) {
+export function toUrl(input: unknown, searchUrl: string = DEFAULT_OPTIONS['@ctmux-search-url']) {
   const s = String(input || '').trim();
   if (!s) return '';
   if (/^javascript:/i.test(s)) return '';
@@ -52,13 +179,13 @@ export function toUrl(input, searchUrl = DEFAULT_OPTIONS['@ctmux-search-url']) {
   return searchUrl.replace('%s', encodeURIComponent(s));
 }
 
-const looksLikeUrl = (s) => {
+const looksLikeUrl = (s: string | null | undefined) => {
   s = String(s || '').trim();
   return /^[a-z][a-z0-9+.-]*:/i.test(s) || (!/\s/.test(s) && /^[\w-]+(\.[\w-]+)+(:\d+)?(\/.*)?$/.test(s)) || /^localhost(:\d+)?/.test(s);
 };
 
 /** New pane contents from a shell-command argument and -c start directory. */
-function paneSpec(t, cmd, startDir, ctx) {
+function paneSpec(t: Engine, cmd: string, startDir: string | true | undefined, ctx: object): { url?: string; prefill?: string } {
   const search = t.getOption('@ctmux-search-url');
   if (cmd) {
     return looksLikeUrl(cmd) ? { url: toUrl(cmd, search) } : { prefill: String(cmd) };
@@ -66,13 +193,13 @@ function paneSpec(t, cmd, startDir, ctx) {
   const dc = t.getOption('default-command');
   if (dc && looksLikeUrl(dc)) return { url: toUrl(dc, search) };
   if (startDir) {
-    const dir = t.expandPlain(startDir, ctx);
+    const dir = t.expandPlain(startDir as string, ctx);
     return { prefill: dir };
   }
   return {};
 }
 
-function sizeFraction(t, spec, totalPx, cellPx) {
+function sizeFraction(t: Engine, spec: string | true | undefined, totalPx: number, cellPx: number) {
   if (spec == null) return null;
   const s = String(spec);
   if (s.endsWith('%')) return Number(s.slice(0, -1)) / 100;
@@ -81,19 +208,19 @@ function sizeFraction(t, spec, totalPx, cellPx) {
   return (n * cellPx) / totalPx;
 }
 
-function paneRects(t, window) {
+function paneRects(t: Engine, window: Window): LayoutRects & { geo: Geometry } {
   const g = t.ui.geometry();
   return { ...L.computeRects(window.layout, g.rect, g.gap), geo: g };
 }
 
-function selectPane(t, session, window, paneId) {
+function selectPane(t: Engine, session: Session, window: Window, paneId: number) {
   t.server.switchTo(session);
   t.server.selectWindow(session, window);
   t.server.selectPane(window, paneId);
   t.ui.focusPane?.(paneId);
 }
 
-function templateReplace(template, value, idx) {
+function templateReplace(template: string, value: string, idx: number) {
   const quoted = String(value).replace(/(["\\$;~])/g, '\\$1');
   return template
     .replace(/%%%/g, quoted)
@@ -101,17 +228,17 @@ function templateReplace(template, value, idx) {
     .replace(/%%/g, value);
 }
 
-function splitList(s) {
+function splitList(s: string | true | null | undefined) {
   return s == null ? [] : String(s).split(',');
 }
 
-function asCommandString(a) {
+function asCommandString(a: CommandArg[]) {
   return a.map((x) => (typeof x === 'string' ? (a.length > 1 ? quoteArg(x) : x) : argToString(x))).join(' ');
 }
 
 // ------------------------------------------------------------- options
 
-function setOptionCmd(t, f, a, ctx) {
+function setOptionCmd(t: Engine, f: Flags, a: CommandArg[], ctx: CommandRunContext) {
   let [name, value] = a.map((x) => argToString(x));
   if (!name) throw new Error('missing option name');
   const origin = ctx.origin || 'user';
@@ -130,7 +257,7 @@ function setOptionCmd(t, f, a, ctx) {
   if (arr && arr[1] in ARRAY_OPTIONS) return setArrayOption(t, f, arr[1], arr[2], value, origin);
   // message-command-fg etc. map onto *-style too.
   if (f.u || f.U) {
-    if (name in DEFAULT_OPTIONS) t.setOption(name, DEFAULT_OPTIONS[name], 'default');
+    if (name in DEFAULT_OPTIONS) t.setOption(name, (DEFAULT_OPTIONS as Record<string, string>)[name], 'default');
     else delete t.options[name];
     return;
   }
@@ -151,7 +278,7 @@ function setOptionCmd(t, f, a, ctx) {
   t.ui.optionChanged?.(name);
 }
 
-function setArrayOption(t, f, base, index, value, origin) {
+function setArrayOption(t: Engine, f: Flags, base: string, index: string | undefined, value: string | undefined, origin: string) {
   const keys = () => t.arrayOption(base).map(([i]) => `${base}[${i}]`);
   if (f.u || f.U) {
     if (index != null) { delete t.options[`${base}[${index}]`]; return; }
@@ -166,7 +293,7 @@ function setArrayOption(t, f, base, index, value, origin) {
     if (f.o && k in t.options) return;
     t.setOption(k, f.a ? (t.options[k] ?? '') + value : value, origin);
   } else {
-    const sep = ARRAY_OPTIONS[base];
+    const sep = (ARRAY_OPTIONS as Record<string, string | null>)[base];
     const items = sep == null ? [value] : value.split(sep === ' ' ? /\s+/ : sep).filter((x) => x !== '');
     if (!f.a) keys().forEach((k) => delete t.options[k]);
     let next = t.arrayOption(base).reduce((m, [i]) => Math.max(m, i + 1), 0);
@@ -188,7 +315,7 @@ def('show-options', ['show', 'show-window-options', 'showw'], 'AgHpqst:vw', (t, 
     if (!names.length && !f.q) throw new Error(`invalid option: ${want}`);
   }
   const lines = names.map((n) => (f.v ? t.options[n] : `${n} ${quoteArg(t.options[n])}`));
-  if (ctx.print) { lines.forEach((l) => ctx.print(l)); return; }
+  if (ctx.print) { lines.forEach((l) => ctx.print!(l)); return; }
   if (want != null) { if (lines.length) t.ui.message(lines.join(' ')); return; }
   t.ui.showList({ title: 'show-options', lines });
 });
@@ -210,7 +337,7 @@ def('show-environment', 'showenv', 'hgst:', (t, f, a, ctx) => {
 def('set-hook', null, 'agpRt:uw', async (t, f, a, ctx) => {
   const [rawName, ...rest] = a;
   if (rawName == null) throw new Error('missing hook name');
-  const m = /^(.+?)(?:\[(\d+)\])?$/.exec(argToString(rawName));
+  const m = /^(.+?)(?:\[(\d+)\])?$/.exec(argToString(rawName))!;
   const name = m[1];
   const index = m[2] != null ? Number(m[2]) : null;
   if (!/^after-/.test(name) && !EVENT_HOOK_NAMES.has(name)) {
@@ -233,7 +360,7 @@ def('set-hook', null, 'agpRt:uw', async (t, f, a, ctx) => {
 
 def('show-hooks', null, 'gpt:w', (t, f, a, ctx) => {
   const want = a.length ? argToString(a[0]) : null;
-  const lines = [];
+  const lines: string[] = [];
   for (const name of Object.keys(t.hooks).sort()) {
     if (want && name !== want) continue;
     t.hooks[name].forEach((cmds, i) => { if (cmds) lines.push(`${name}[${i}] ${formatCommandList(cmds)}`); });
@@ -253,7 +380,7 @@ def('bind-key', 'bind', 'nrN:T:', (t, f, a, ctx) => {
     t.notice(`mouse binding ${keyStr} in ${table}: mouse handling is native in the browser`, { source: ctx.source, line: ctx.line, level: 'info', key: 'mouse-bind' });
   }
   const commands = toCommandList(cmd.length === 1 ? cmd[0] : cmd, t.env);
-  const k = t.bind(table, keyStr, commands, { repeat: !!f.r, note: f.N || '', origin: ctx.origin || 'user' });
+  const k = t.bind(table, keyStr, commands, { repeat: !!f.r, note: (f.N as string) || '', origin: ctx.origin || 'user' });
   if (!k) throw new Error(`unknown key: ${keyStr}`);
   t.ui.keysChanged?.();
 });
@@ -266,8 +393,8 @@ def('unbind-key', 'unbind', 'anqT:', (t, f, a) => {
 });
 
 def('list-keys', 'lsk', '1aNP:T:', (t, f, a, ctx) => {
-  const lines = [];
-  const tables = f.T ? [f.T] : [...t.tables.keys()].sort((x, y) => (x === 'prefix' ? -1 : y === 'prefix' ? 1 : x.localeCompare(y)));
+  const lines: string[] = [];
+  const tables = f.T ? [f.T as string] : [...t.tables.keys()].sort((x, y) => (x === 'prefix' ? -1 : y === 'prefix' ? 1 : x.localeCompare(y)));
   const prefix = t.getOption('prefix');
   for (const name of tables) {
     const map = t.tables.get(name);
@@ -283,15 +410,15 @@ def('list-keys', 'lsk', '1aNP:T:', (t, f, a, ctx) => {
       }
     }
   }
-  if (ctx.print) { lines.forEach((l) => ctx.print(l)); return; }
+  if (ctx.print) { lines.forEach((l) => ctx.print!(l)); return; }
   t.ui.showList({ title: f.N ? 'Key bindings' : 'list-keys', lines, filterable: true });
 });
 
 def('switch-client', 'switchc', 'cEFlnpt:rT:Z', (t, f, a, ctx) => {
-  if (f.T) { t.keyTable = f.T; t.ui.setKeyTable?.(f.T); return; }
+  if (f.T) { t.keyTable = f.T as string; t.ui.setKeyTable?.(f.T as string); return; }
   const srv = t.server;
   const list = srv.sessions.slice().sort((x, y) => x.name.localeCompare(y.name, undefined, { numeric: true }));
-  let s;
+  let s: Session | null | undefined;
   if (f.l) s = srv.sessionById(srv.lastSessionId);
   else if (f.n || f.p) {
     const i = list.indexOf(srv.session);
@@ -313,11 +440,11 @@ def('source-file', 'source', 'Fnqv', async (t, f, a, ctx) => {
   for (const raw of a) {
     let path = argToString(raw);
     if (f.F) path = t.expandPlain(path, ctx);
-    let text;
+    let text: string;
     try {
       text = await t.loadFile(path);
     } catch (err) {
-      if (!f.q) throw new Error(`${path}: ${err.message || err}`);
+      if (!f.q) throw new Error(`${path}: ${(err as Error).message || err}`);
       continue;
     }
     if (f.n) continue; // parse only
@@ -340,18 +467,18 @@ def('run-shell', 'run', 'bCd:t:Es:c:', async (t, f, a, ctx) => {
   }
   const out = r.out.replace(/\n$/, '');
   if (out) {
-    if (ctx.print) out.split('\n').forEach((l) => ctx.print(l));
+    if (ctx.print) out.split('\n').forEach((l) => ctx.print!(l));
     else if (ctx.fromConfig) t.log(`run-shell: ${out}`);
     else if (!f.b) t.ui.showList({ title: 'run-shell', lines: out.split('\n') });
   }
   if (r.code !== 0 && !ctx.fromConfig && !f.b) t.ui.message(`'${short(cmd)}' returned ${r.code}`);
 });
 
-const short = (c) => (c.length > 50 ? c.slice(0, 47) + '...' : c);
+const short = (c: string) => (c.length > 50 ? c.slice(0, 47) + '...' : c);
 
 def('if-shell', 'if', 'bFt:', async (t, f, a, ctx) => {
   const [cond, then, otherwise] = a;
-  let ok;
+  let ok: boolean;
   if (f.F) {
     const v = t.expandPlain(argToString(cond), ctx);
     ok = v !== '' && v !== '0';
@@ -375,15 +502,15 @@ def('if-shell', 'if', 'bFt:', async (t, f, a, ctx) => {
 
 def('new-window', 'neww', 'abc:de:F:kn:Pt:S', (t, f, a, ctx) => {
   const srv = t.server;
-  let session = srv.session;
-  let index;
+  let session: Session | null = srv.session;
+  let index: number | undefined;
   if (f.t) {
     const spec = String(f.t);
     const m = /^(?:([^:]*):)?=?(\d+)$/.exec(spec);
     if (m) {
       session = m[1] ? target(t, m[1], 'session', ctx).session : session;
       index = Number(m[2]);
-      const existing = session.windows.find((w) => w.index === index);
+      const existing = session!.windows.find((w) => w.index === index);
       if (existing && f.k) srv.killWindow(session, existing);
       else if (existing && !f.a && !f.b) throw new Error(`index ${index} in use`);
     } else {
@@ -392,27 +519,27 @@ def('new-window', 'neww', 'abc:de:F:kn:Pt:S', (t, f, a, ctx) => {
   }
   if (!session) session = srv.newSession({});
   const spec = paneSpec(t, a.length ? asCommandString(a) : '', f.c, ctx);
-  const w = srv.newWindow(session, { ...spec, name: f.n, index, after: !!f.a, select: !f.d });
+  const w = srv.newWindow(session, { ...spec, name: f.n as string | undefined, index, after: !!f.a, select: !f.d });
   if (!f.d) srv.switchTo(session);
-  if (f.P) t.ui.message(t.expandPlain(f.F || '#{session_name}:#{window_index}.#{pane_index}', { session, window: w }));
+  if (f.P) t.ui.message(t.expandPlain((f.F as string) || '#{session_name}:#{window_index}.#{pane_index}', { session, window: w }));
   if (!f.d) t.ui.focusPane?.(w.active);
 });
 
 def('select-window', 'selectw', 'lnpTt:', (t, f, a, ctx) => {
   const srv = t.server;
-  if (f.l) return COMMANDS.get('last-window').run(t, {}, [], ctx);
-  if (f.n) return COMMANDS.get('next-window').run(t, {}, [], ctx);
-  if (f.p) return COMMANDS.get('previous-window').run(t, {}, [], ctx);
+  if (f.l) return COMMANDS.get('last-window')!.run(t, {}, [], ctx);
+  if (f.n) return COMMANDS.get('next-window')!.run(t, {}, [], ctx);
+  if (f.p) return COMMANDS.get('previous-window')!.run(t, {}, [], ctx);
   const r = target(t, f.t, 'window', ctx);
-  if (f.T && r.window.id === r.session.active) return COMMANDS.get('last-window').run(t, {}, [], ctx);
+  if (f.T && r.window.id === r.session.active) return COMMANDS.get('last-window')!.run(t, {}, [], ctx);
   srv.switchTo(r.session);
   srv.selectWindow(r.session, r.window);
   t.ui.focusPane?.();
 });
 
-function cycleWindow(t, delta) {
+function cycleWindow(t: Engine, delta: number) {
   const srv = t.server;
-  const s = srv.session;
+  const s: Session | null = srv.session;
   if (!s) return;
   const sorted = srv.sortedWindows(s);
   if (sorted.length < 2) return;
@@ -425,7 +552,7 @@ def('next-window', 'next', 'at:', (t, f) => { if (f.a) { t.ui.message('No next w
 def('previous-window', 'prev', 'at:', (t, f) => { if (f.a) { t.ui.message('No previous window with alert'); return; } cycleWindow(t, -1); });
 
 def('last-window', 'last', 't:', (t) => {
-  const s = t.server.session;
+  const s: Session | null = t.server.session;
   const w = s && s.windows.find((x) => x.id === s.last);
   if (!w) { t.ui.message('No last window'); return; }
   t.server.selectWindow(s, w);
@@ -480,9 +607,9 @@ def('rotate-window', 'rotatew', 'DUt:Z', (t, f, a, ctx) => {
   r.window.layout = L.rotate(r.window.layout, !!f.U);
 });
 
-const layoutMain = (t, window) => {
+const layoutMain = (t: Engine, window: Window) => {
   const g = t.ui.geometry();
-  const frac = (opt, total, cell) => {
+  const frac = (opt: string, total: number, cell: number) => {
     const v = String(t.getOption(opt));
     if (v.endsWith('%')) return Number(v.slice(0, -1)) / 100;
     const px = Number(v) * cell;
@@ -491,24 +618,24 @@ const layoutMain = (t, window) => {
   return { h: frac('main-pane-height', g.rect.h, g.cell.h), v: frac('main-pane-width', g.rect.w, g.cell.w) };
 };
 
-function applyLayout(t, window, name) {
+function applyLayout(t: Engine, window: EngineWindow, name: string) {
   const ids = L.panesInOrder(window.layout);
   const main = layoutMain(t, window);
   const tree = L.presetLayout(name, ids, name.startsWith('main-horizontal') ? main.h : main.v);
   if (!tree) throw new Error(`unknown layout: ${name}`);
   window.prevLayout = window.layout;
-  window.layout = tree;
+  window.layout = tree as LayoutNode;
   window.layoutName = name;
   window.zoomed = false;
 }
 
 def('select-layout', 'selectl', 'Enopt:', (t, f, a, ctx) => {
   const r = target(t, f.t, 'window', ctx);
-  const w = r.window;
+  const w: EngineWindow = r.window;
   if (f.o) { if (w.prevLayout) [w.layout, w.prevLayout] = [w.prevLayout, w.layout]; return; }
   if (f.E) { w.prevLayout = w.layout; w.layout = L.spread(w.layout); return; }
   if (f.n || f.p) {
-    const i = L.LAYOUTS.indexOf(w.layoutName);
+    const i = L.LAYOUTS.indexOf(w.layoutName as string);
     const n = L.LAYOUTS.length;
     return applyLayout(t, w, L.LAYOUTS[(i + (f.n ? 1 : n - 1) + (i === -1 && f.p ? 1 : 0)) % n]);
   }
@@ -522,21 +649,21 @@ def('select-layout', 'selectl', 'Enopt:', (t, f, a, ctx) => {
 
 def('next-layout', 'nextl', 't:', (t, f, a, ctx) => {
   const w = target(t, f.t, 'window', ctx).window;
-  const i = L.LAYOUTS.indexOf(w.layoutName);
+  const i = L.LAYOUTS.indexOf(w.layoutName as string);
   applyLayout(t, w, L.LAYOUTS[(i + 1) % L.LAYOUTS.length]);
 });
 
 def('previous-layout', 'prevl', 't:', (t, f, a, ctx) => {
   const w = target(t, f.t, 'window', ctx).window;
-  const i = L.LAYOUTS.indexOf(w.layoutName);
+  const i = L.LAYOUTS.indexOf(w.layoutName as string);
   applyLayout(t, w, L.LAYOUTS[(i - 1 + L.LAYOUTS.length * 2) % L.LAYOUTS.length]);
 });
 
 def('find-window', 'findw', 'CiNrTt:Z', (t, f, a) => {
   const needle = argToString(a[0] ?? '');
-  const test = (s) => (f.i ? String(s).toLowerCase().includes(needle.toLowerCase()) : String(s).includes(needle));
+  const test = (s: unknown) => (f.i ? String(s).toLowerCase().includes(needle.toLowerCase()) : String(s).includes(needle));
   const srv = t.server;
-  const hits = [];
+  const hits: { s: Session; w: Window; id: number }[] = [];
   for (const s of srv.sessions) {
     for (const w of s.windows) {
       for (const id of L.panesInOrder(w.layout)) {
@@ -565,17 +692,17 @@ def('split-window', 'splitw', 'bc:de:fF:hIl:p:Pt:vZ', (t, f, a, ctx) => {
   const size = f.p != null ? Number(f.p) / 100 : sizeFraction(t, f.l, total, cell);
   const spec = paneSpec(t, a.length ? asCommandString(a) : '', f.c, { ...ctx, pane: r.pane, window: r.window, session: r.session });
   const p = t.server.splitPane(r.window, r.pane, dir, { ...spec, before: !!f.b, full: !!f.f, size: size ?? undefined, select: !f.d });
-  if (f.P) t.ui.message(t.expandPlain(f.F || '#{session_name}:#{window_index}.#{pane_index}', { session: r.session, window: r.window, pane: p.id }));
+  if (f.P) t.ui.message(t.expandPlain((f.F as string) || '#{session_name}:#{window_index}.#{pane_index}', { session: r.session, window: r.window, pane: p.id }));
   if (!f.d) t.ui.focusPane?.(p.id);
 });
 
 def('select-pane', 'selectp', 'DdegLlMmP:RT:t:UZ', (t, f, a, ctx) => {
   const srv = t.server;
-  if (f.l) return COMMANDS.get('last-pane').run(t, f, a, ctx);
+  if (f.l) return COMMANDS.get('last-pane')!.run(t, f, a, ctx);
   const r = target(t, f.t, 'pane', ctx);
   if (f.T != null) {
     const p = srv.panes[r.pane];
-    p.title = f.T;
+    p.title = f.T as string;
     p.manualTitle = true;
     return;
   }
@@ -651,9 +778,9 @@ def('resize-pane', 'resizep', 'DLMRTt:Ux:y:Z', (t, f, a, ctx) => {
 def('swap-pane', 'swapp', 'dDs:t:UZ', (t, f, a, ctx) => {
   const dst = target(t, f.t, 'pane', ctx);
   const w = dst.window;
-  let src;
+  let src: Pick<Target, 'window' | 'pane'>;
   if (f.U || f.D) {
-    const ids = L.panesInOrder(w.layout);
+    const ids: number[] = L.panesInOrder(w.layout);
     const i = ids.indexOf(dst.pane);
     const other = ids[(i + (f.U ? -1 : 1) + ids.length) % ids.length];
     src = { window: w, pane: other };
@@ -675,12 +802,12 @@ def('swap-pane', 'swapp', 'dDs:t:UZ', (t, f, a, ctx) => {
 
 def('break-pane', 'breakp', 'abdPF:n:s:t:', (t, f, a, ctx) => {
   const r = target(t, f.s, 'pane', ctx);
-  let index;
+  let index: number | undefined;
   if (f.t != null) {
     const m = /(\d+)$/.exec(String(f.t));
     if (m) index = Number(m[1]);
   }
-  const w = t.server.breakPane(r.pane, { name: f.n, select: !f.d, index, after: !!f.a });
+  const w = t.server.breakPane(r.pane, { name: f.n as string | undefined, select: !f.d, index, after: !!f.a });
   if (w && !f.d) t.ui.focusPane?.(r.pane);
 });
 
@@ -731,7 +858,7 @@ def('new-session', 'new', 'Ac:dDEF:f:n:Ps:t:x:Xy:', (t, f, a, ctx) => {
   const prev = srv.session;
   const s = srv.newSession({ name: f.s, windowName: f.n, ...spec });
   if (f.d && prev) srv.switchTo(prev);
-  if (f.P) t.ui.message(t.expandPlain(f.F || '#{session_name}:', { session: s }));
+  if (f.P) t.ui.message(t.expandPlain((f.F as string) || '#{session_name}:', { session: s }));
   t.ui.focusPane?.();
 });
 
@@ -760,18 +887,18 @@ def('kill-server', null, '', (t) => {
 def('has-session', 'has', 't:', (t, f, a, ctx) => { target(t, f.t, 'session', ctx); });
 
 def('list-sessions', 'ls', 'F:f:', (t, f, a, ctx) => {
-  const fmt = f.F || '#{session_name}: #{session_windows} windows (created #{t:session_created})#{?session_attached, (attached),}';
-  const keep = (c) => !f.f || truthyFmt(t.expandPlain(f.f, c));
+  const fmt = (f.F as string) || '#{session_name}: #{session_windows} windows (created #{t:session_created})#{?session_attached, (attached),}';
+  const keep = (c: object) => !f.f || truthyFmt(t.expandPlain(f.f as string, c));
   t.output(ctx, t.server.sessions.filter((s) => keep({ session: s })).map((s) => t.expandPlain(fmt, { session: s })), 'list-sessions');
 });
 
 def('list-windows', 'lsw', 'aF:f:t:', (t, f, a, ctx) => {
   const sessions = f.a ? t.server.sessions : [target(t, f.t, 'session', ctx).session];
-  const fmt = f.F || (f.a ? '#{session_name}:' : '') + '#{window_index}: #{window_name}#{window_flags} (#{window_panes} panes)';
-  const lines = [];
+  const fmt = (f.F as string) || (f.a ? '#{session_name}:' : '') + '#{window_index}: #{window_name}#{window_flags} (#{window_panes} panes)';
+  const lines: string[] = [];
   for (const s of sessions) {
     for (const w of t.server.sortedWindows(s)) {
-      if (f.f && !truthyFmt(t.expandPlain(f.f, { session: s, window: w }))) continue;
+      if (f.f && !truthyFmt(t.expandPlain(f.f as string, { session: s, window: w }))) continue;
       lines.push(t.expandPlain(fmt, { session: s, window: w }));
     }
   }
@@ -780,14 +907,14 @@ def('list-windows', 'lsw', 'aF:f:t:', (t, f, a, ctx) => {
 
 def('list-panes', 'lsp', 'asF:f:t:', (t, f, a, ctx) => {
   const r = target(t, f.t, 'window', ctx);
-  const fmt = f.F || '#{pane_index}: #{pane_title} #{pane_current_path}#{?pane_active, (active),}';
-  const wins = f.a ? t.server.sessions.flatMap((s) => t.server.sortedWindows(s).map((w) => [s, w]))
+  const fmt = (f.F as string) || '#{pane_index}: #{pane_title} #{pane_current_path}#{?pane_active, (active),}';
+  const wins: [Session, Window][] = f.a ? t.server.sessions.flatMap((s) => t.server.sortedWindows(s).map((w) => [s, w]))
     : f.s ? t.server.sortedWindows(r.session).map((w) => [r.session, w]) : [[r.session, r.window]];
-  const lines = [];
+  const lines: string[] = [];
   for (const [session, window] of wins) {
     for (const id of L.panesInOrder(window.layout)) {
       const c = { session, window, pane: id };
-      if (f.f && !truthyFmt(t.expandPlain(f.f, c))) continue;
+      if (f.f && !truthyFmt(t.expandPlain(f.f as string, c))) continue;
       lines.push(t.expandPlain(fmt, c));
     }
   }
@@ -810,7 +937,7 @@ def('refresh-client', 'refresh', 'A:B:cC:Df:F:l:LRSt:U', (t) => t.ui.refresh?.()
 // ------------------------------------------------------- messages / modes
 
 def('display-message', 'display', 'aCc:d:INpt:F:lv', (t, f, a, ctx) => {
-  const r = resolveTarget(t.server, f.t, 'pane', ctx, t.ui.geometry()) || {};
+  const r: Partial<Target> = (resolveTarget as unknown as ResolveTarget)(t.server, f.t, 'pane', ctx, t.ui.geometry()) || {};
   const fctx = { session: r.session, window: r.window, pane: r.pane };
   if (f.a) {
     const names = ['session_name', 'session_id', 'window_index', 'window_name', 'window_flags', 'window_panes',
@@ -820,7 +947,7 @@ def('display-message', 'display', 'aCc:d:INpt:F:lv', (t, f, a, ctx) => {
     return;
   }
   const fmt = a.length ? argToString(a[0])
-    : f.F || '[#{session_name}] #{window_index}:#{window_name}, current pane #{pane_index} - (%H:%M %d-%b-%y)';
+    : (f.F as string) || '[#{session_name}] #{window_index}:#{window_name}, current pane #{pane_index} - (%H:%M %d-%b-%y)';
   const text = f.l ? fmt : t.expandPlain(fmt, fctx, { time: true });
   if (ctx.print && (f.p || ctx.fromShell)) { ctx.print(text); return; }
   t.ui.message(text, { duration: f.d != null ? Number(f.d) : undefined });
@@ -830,7 +957,7 @@ def('command-prompt', null, '1beFiklNI:p:t:T:W', async (t, f, a, ctx) => {
   let template = a.length ? (a.length === 1 ? argToString(a[0]).replace(/^\{ (.*) \}$/s, '$1') : asCommandString(a)) : null;
   if (template && f.F) template = t.expandPlain(template, ctx);
   const cmdName = template ? template.trim().split(/\s+/)[0] : null;
-  const prompts = f.p != null ? splitList(t.expandPlain(f.p, ctx)).map((p) => p + ' ')
+  const prompts = f.p != null ? splitList(t.expandPlain(f.p as string, ctx)).map((p) => p + ' ')
     : [template ? `(${cmdName}) ` : ':'];
   const inputs = f.I != null ? splitList(f.I).map((s) => t.expandPlain(s, ctx)) : [];
   const answers = await t.ui.prompt({
@@ -848,7 +975,7 @@ def('command-prompt', null, '1beFiklNI:p:t:T:W', async (t, f, a, ctx) => {
 
 def('confirm-before', 'confirm', 'bc:p:t:y', async (t, f, a, ctx) => {
   const cmd = a.length === 1 ? argToString(a[0]).replace(/^\{ (.*) \}$/s, '$1') : asCommandString(a);
-  const prompt = f.p != null ? t.expandPlain(f.p, ctx) : `Confirm '${cmd}'? (y/n)`;
+  const prompt = f.p != null ? t.expandPlain(f.p as string, ctx) : `Confirm '${cmd}'? (y/n)`;
   const ok = await t.ui.confirm(prompt, { defaultYes: !!f.y, confirmKey: f.c || 'y' });
   if (ok) await t.runString(cmd, ctx);
 });
@@ -897,9 +1024,9 @@ def('send-prefix', null, '2t:', (t) => {
 def('set-buffer', 'setb', 'aAb:n:t:w', (t, f, a) => {
   const data = argToString(a[0] ?? '');
   const existing = f.b ? t.buffers.find((x) => x.name === f.b) : t.buffers[0];
-  if (f.n) { if (!existing) throw new Error('no buffer'); existing.name = f.n; return; }
+  if (f.n) { if (!existing) throw new Error('no buffer'); existing.name = f.n as string; return; }
   if (f.a && existing) existing.data += data;
-  else pushBuffer(t, data, f.b);
+  else pushBuffer(t, data, f.b as string | undefined);
   if (f.w) t.ui.writeClipboard?.(data);
 });
 
@@ -933,7 +1060,7 @@ def('choose-buffer', null, 'F:f:K:NO:rt:yZ', async (t, f, a, ctx) => {
     items: t.buffers.map((b, i) => ({ label: `${b.name}: "${b.data.slice(0, 80).replace(/\n/g, '\\n')}"`, value: i })),
   });
   if (choice == null) return;
-  const b = t.buffers[choice];
+  const b = t.buffers[choice as number];
   const r = target(t, f.t, 'pane', ctx);
   await t.ui.paneCommand?.(r.pane, { type: 'paste', text: b.data });
 });
@@ -942,17 +1069,17 @@ def('choose-buffer', null, 'F:f:K:NO:rt:yZ', async (t, f, a, ctx) => {
 // ------------------------------------------------------- menus / popups
 
 /** Turn a menu item command (string or { block }) into a command string with formats expanded. */
-function menuCommand(t, cmd, fctx) {
-  let str = cmd == null ? '' : (typeof cmd === 'string' ? cmd : cmd.text ?? argToString(cmd));
+function menuCommand(t: Engine, cmd: CommandArg | undefined, fctx: object) {
+  let str = cmd == null ? '' : (typeof cmd === 'string' ? cmd : (cmd as { text?: string }).text ?? argToString(cmd));
   // Bindings store `{ ... }` blocks as text; unwrap them like command-prompt does.
   str = str.replace(/^\{\s*(.*?)\s*\}$/s, '$1');
   return t.expandPlain(str, fctx);
 }
 
 def('display-menu', 'menu', 'b:c:C:H:MOs:S:t:T:x:y:', async (t, f, a, ctx) => {
-  const r = resolveTarget(t.server, f.t, 'pane', ctx, t.ui.geometry()) || {};
+  const r: Partial<Target> = (resolveTarget as unknown as ResolveTarget)(t.server, f.t, 'pane', ctx, t.ui.geometry()) || {};
   const fctx = { session: r.session, window: r.window, pane: r.pane };
-  const items = [];
+  const items: MenuItem[] = [];
   for (let i = 0; i < a.length;) {
     const name = argToString(a[i]);
     if (name === '') { items.push({ separator: true }); i++; continue; }
@@ -966,13 +1093,13 @@ def('display-menu', 'menu', 'b:c:C:H:MOs:S:t:T:x:y:', async (t, f, a, ctx) => {
   }
   const selectable = items.filter((x) => !x.separator && !x.disabled);
   if (!selectable.length) return;
-  const title = f.T != null ? t.expandPlain(f.T, fctx) : '';
-  let chosen;
+  const title = f.T != null ? t.expandPlain(f.T as string, fctx) : '';
+  let chosen: MenuItem | null | undefined;
   if (t.ui.menu) {
     chosen = await t.ui.menu({ title, items, start: f.C != null ? Number(f.C) : 0, x: f.x, y: f.y });
   } else {
     const v = await t.ui.pick({ title: title || 'menu', fuzzy: false, items: selectable.map((x) => ({ label: x.key ? `(${x.key}) ${x.label}` : x.label, value: items.indexOf(x) })) });
-    chosen = v == null ? null : items[v];
+    chosen = v == null ? null : items[v as number];
   }
   if (!chosen || chosen.disabled || chosen.separator || !chosen.command) return;
   await t.runString(chosen.command, { ...ctx, ...fctx, fromKey: true });
@@ -980,12 +1107,12 @@ def('display-menu', 'menu', 'b:c:C:H:MOs:S:t:T:x:y:', async (t, f, a, ctx) => {
 
 def('display-popup', 'popup', 'BCEkNb:c:d:e:h:s:S:t:T:w:x:y:', async (t, f, a, ctx) => {
   if (f.C) { t.ui.closePopup?.(); return; }
-  const r = resolveTarget(t.server, f.t, 'pane', ctx, t.ui.geometry()) || {};
+  const r: Partial<Target> = (resolveTarget as unknown as ResolveTarget)(t.server, f.t, 'pane', ctx, t.ui.geometry()) || {};
   const fctx = { session: r.session, window: r.window, pane: r.pane };
   let cmd = a.length ? asCommandString(a) : '';
   if (!cmd) cmd = t.getOption('default-command');
-  if (!cmd && f.d) cmd = t.expandPlain(f.d, fctx);
-  const geometry = { width: f.w, height: f.h, x: f.x, y: f.y, title: f.T != null ? t.expandPlain(f.T, fctx) : '', border: f.B ? 'none' : f.b };
+  if (!cmd && f.d) cmd = t.expandPlain(f.d as string, fctx);
+  const geometry = { width: f.w, height: f.h, x: f.x, y: f.y, title: f.T != null ? t.expandPlain(f.T as string, fctx) : '', border: f.B ? 'none' : f.b };
   if (cmd && looksLikeUrl(cmd)) {
     if (!t.ui.popup) { t.ui.openTab?.(toUrl(cmd, t.getOption('@ctmux-search-url'))); return; }
     t.ui.popup({ ...geometry, url: toUrl(cmd, t.getOption('@ctmux-search-url')) });
@@ -1007,9 +1134,9 @@ def('display-popup', 'popup', 'BCEkNb:c:d:e:h:s:S:t:T:w:x:y:', async (t, f, a, c
 
 // --------------------------------------------------------- synchronisation
 
-function channel(t, name) {
+function channel(t: Engine, name: string) {
   if (!t.waitChannels.has(name)) t.waitChannels.set(name, { waiters: [], woken: false, locked: false, lockers: [] });
-  return t.waitChannels.get(name);
+  return t.waitChannels.get(name)!;
 }
 
 def('wait-for', 'wait', 'LSU', async (t, f, a, ctx) => {
@@ -1048,29 +1175,29 @@ def('capture-pane', 'capturep', 'ab:CeE:JNpPqS:t:T', async (t, f, a, ctx) => {
   const p = t.server.panes[r.pane];
   let text = '';
   if (p.kind === 'web') {
-    const res = await t.ui.paneCommand?.(r.pane, { type: 'capture', all: f.S === '-' });
+    const res = await t.ui.paneCommand?.(r.pane, { type: 'capture', all: f.S === '-' }) as { text?: string } | undefined;
     text = res?.text ?? [p.title, p.url].filter(Boolean).join('\n');
   } else {
     text = p.prefill || '';
   }
   if (f.J) text = text.replace(/\n(?=\S)/g, ' ');
   let ls = text.split('\n');
-  const n = (v, def) => (v == null || v === '-' ? def : Number(v));
+  const n = (v: string | true | undefined, def: number) => (v == null || v === '-' ? def : Number(v));
   if (f.S != null || f.E != null) {
     const start = n(f.S, 0), end = n(f.E, ls.length - 1);
     ls = ls.slice(Math.max(0, start < 0 ? ls.length + start : start), (end < 0 ? ls.length + end : end) + 1);
   }
   text = ls.join('\n');
   if (f.p) { t.output(ctx, ls, 'capture-pane'); return; }
-  pushBuffer(t, text, f.b);
+  pushBuffer(t, text, f.b as string | undefined);
 });
 
-function pushBuffer(t, data, name) {
+function pushBuffer(t: Engine, data: string, name: string | undefined) {
   if (name) {
     const b = t.buffers.find((x) => x.name === name);
     if (b) { b.data = data; b.time = Date.now(); return b; }
   }
-  const b = { name: name || `buffer${String(t.buffers.length).padStart(4, '0')}`, data, time: Date.now() };
+  const b: PasteBuffer = { name: name || `buffer${String(t.buffers.length).padStart(4, '0')}`, data, time: Date.now() };
   t.buffers.unshift(b);
   const limit = Number(t.getOption('buffer-limit')) || 50;
   if (t.buffers.length > limit) t.buffers.length = limit;
@@ -1081,7 +1208,7 @@ def('save-buffer', 'saveb', 'ab:', (t, f, a, ctx) => {
   const b = f.b ? t.buffers.find((x) => x.name === f.b) : t.buffers[0];
   if (!b) throw new Error('no buffers');
   const path = argToString(a[0] ?? '-');
-  if (path === '-' && ctx.print) { b.data.split('\n').forEach((l) => ctx.print(l)); return; }
+  if (path === '-' && ctx.print) { b.data.split('\n').forEach((l) => ctx.print!(l)); return; }
   // No file system: the closest useful thing is the system clipboard.
   t.ui.writeClipboard?.(b.data);
   if (path !== '-') t.notice(`save-buffer ${path}: no file system in the browser; copied to the clipboard instead`, { level: 'info', key: 'save-buffer' });
@@ -1089,12 +1216,12 @@ def('save-buffer', 'saveb', 'ab:', (t, f, a, ctx) => {
 
 def('load-buffer', 'loadb', 'b:t:w', async (t, f, a) => {
   const path = argToString(a[0] ?? '-');
-  let data;
+  let data: string;
   if (path === '-') data = (await t.ui.readClipboard?.()) ?? '';
   else {
-    try { data = await t.loadFile(path); } catch (err) { throw new Error(`${path}: ${err.message || err}`); }
+    try { data = await t.loadFile(path); } catch (err) { throw new Error(`${path}: ${(err as Error).message || err}`); }
   }
-  pushBuffer(t, String(data), f.b);
+  pushBuffer(t, String(data), f.b as string | undefined);
   if (f.w) t.ui.writeClipboard?.(String(data));
 });
 
@@ -1105,7 +1232,7 @@ def('pipe-pane', 'pipep', 'IOot:', (t, f, a, ctx) => {
 // ------------------------------------------------------- clients / server
 
 def('list-clients', 'lsc', 'F:f:t:', (t, f, a, ctx) => {
-  const fmt = f.F || '#{client_name}: #{session_name} [#{client_width}x#{client_height} #{client_termname}] (utf8)';
+  const fmt = (f.F as string) || '#{client_name}: #{session_name} [#{client_width}x#{client_height} #{client_termname}] (utf8)';
   t.output(ctx, [t.expandPlain(fmt)], 'list-clients');
 });
 
@@ -1129,13 +1256,13 @@ def('unlink-window', 'unlinkw', 'kt:', (t, f, a, ctx) => {
   t.ui.serverEmpty?.();
   t.ui.focusPane?.();
 });
-def('customize-mode', null, 'F:f:Nt:yZ', (t, f, a, ctx) => COMMANDS.get('show-options').run(t, {}, [], ctx));
+def('customize-mode', null, 'F:f:Nt:yZ', (t, f, a, ctx) => COMMANDS.get('show-options')!.run(t, {}, [], ctx));
 def('show-prompt-history', 'showphist', 'T:', (t, f, a, ctx) => t.output(ctx, t.ui.promptHistory?.() || [], 'prompt history'));
 def('clear-prompt-history', 'clearphist', 'T:', (t) => t.ui.clearPromptHistory?.());
 
 // ---------------------------------------------------- chrome-tmux specific
 
-function navigate(t, paneId, input) {
+function navigate(t: Engine, paneId: number, input: string) {
   const p = t.server.panes[paneId];
   const url = toUrl(input, t.getOption('@ctmux-search-url'));
   if (!url) {
