@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Workspace page controller: boots the tmux engine, renders it, and connects
 // keyboard input from this page and from pane agents (content scripts).
 
@@ -10,21 +9,140 @@ import { loadMainConfig, loadConfigFile, CONF_KEY } from '../shared/config-sourc
 import { renderStatus } from './status.js';
 import { PaneView, GAP } from './panes.js';
 import { Overlays } from './overlays.js';
+import type { HistoryEntry, PaneViewServer } from './panes.js';
+import type { CommandContext, Geometry, KeyValueStorage, Notice, Pane, Session, Ui, UiOptions, Window as TmuxWindow } from '../core/types.js';
 
-const { createRouter } = globalThis.CtmuxKeys;
+/** A key the router (src/shared/keys.ts) says the workspace should execute. */
+interface KeyRoute {
+  table: string;
+  key: string;
+  prefix?: boolean;
+}
+
+interface KeyRouter {
+  feed(input: string | KeyboardEvent): KeyRoute | null;
+  readonly table: string;
+  setTable(name: string): void;
+  reset(): void;
+}
+
+/** globalThis.CtmuxKeys, installed by the classic script src/shared/keys.js. */
+interface CtmuxKeysApi {
+  normalizeKey(str: unknown): string | null;
+  eventToKey(e: KeyboardEvent): string | null;
+  createRouter(getConfig: () => unknown, now?: () => number): KeyRouter;
+}
+
+/** Pane fields the workspace adds on top of the engine's Pane. */
+interface WorkspacePane extends Pane {
+  /** Frame id of the pane's iframe in this tab, learned from its agent. */
+  frameId?: number;
+  manualTitle?: boolean;
+  mode?: string | null;
+}
+
+interface PasteBuffer {
+  name: string;
+  data: string;
+  time: number;
+}
+
+/** The server surface this page uses (Server is not typed yet). */
+interface WorkspaceServer extends PaneViewServer {
+  sessions: Session[];
+  panes: Record<number, WorkspacePane>;
+  readonly session: Session | null;
+  readonly window: TmuxWindow | null;
+  readonly pane: WorkspacePane | null;
+  load(json: unknown): boolean;
+  newSession(opts: { name?: string; url?: string; prefill?: string; windowName?: string }): Session;
+  toJSON(): unknown;
+  locate(paneId: number): { session: Session; window: TmuxWindow } | null;
+  selectWindow(session: Session, window: TmuxWindow): void;
+  selectPane(window: TmuxWindow, paneId: number): void;
+  addEventListener: EventTarget['addEventListener'];
+}
+
+/**
+ * The engine as this page uses it: Tmux plus the state fields its constructor
+ * sets, with the signatures of the methods whose optional parameters are not
+ * typed yet.
+ */
+type Engine = Omit<Tmux, 'notice' | 'expandPlain' | 'handleKey'> & {
+  notice(message: string, opts?: { source?: string; line?: number; level?: string; key?: string }): void;
+  expandPlain(fmt: unknown, ctx?: CommandContext, opts?: { time?: boolean }): string;
+  handleKey(r: KeyRoute, ctx?: CommandContext): Promise<unknown>;
+  server: WorkspaceServer;
+  notices: Notice[];
+  buffers: PasteBuffer[];
+  keyTable: string;
+  sourcing: number;
+};
+
+/** `overlay` argument of renderStatus(): null, { message, style } or { prompt, command }. */
+interface StatusOverlay {
+  message?: string;
+  style?: string;
+  prompt?: HTMLElement;
+  command?: string;
+}
+
+/** Overlays plus the state fields its constructor and methods set. */
+type WorkspaceOverlays = Overlays & {
+  promptHistory: string[];
+  statusOverlay: StatusOverlay | null;
+  dismissMessage?: () => void;
+};
+
+/** Messages pane agents (src/content/pane-agent.ts) send to the workspace. */
+type AgentMessage = { pane?: number | null; root?: boolean } & (
+  | { ctmux: 'register-workspace' }
+  | { ctmux: 'key'; table: string; key: string; prefix?: boolean }
+  | { ctmux: 'hello' | 'report'; url?: string; title?: string }
+  | { ctmux: 'focus' }
+  | { ctmux: 'mode'; mode?: string | null }
+  | { ctmux: 'yank'; text: string; copied?: boolean }
+  | { ctmux: 'paste-request' }
+);
+
+interface ConfigMeta {
+  label: string;
+  error: string | null;
+  lines: number;
+}
+
+const { createRouter } = (globalThis as unknown as { CtmuxKeys: CtmuxKeysApi }).CtmuxKeys;
 const RUNTIME_KEY = 'ctmux:runtime';
 const HISTORY_KEY = 'ctmux:history';
 
-const chromeStorage = {
-  async get(k) { return (await chrome.storage.local.get(k))[k]; },
-  async set(k, v) { await chrome.storage.local.set({ [k]: v }); },
-  async remove(k) { await chrome.storage.local.remove(k); },
+const chromeStorage: KeyValueStorage = {
+  async get(k: string) { return (await chrome.storage.local.get(k))[k]; },
+  async set(k: string, v: unknown) { await chrome.storage.local.set({ [k]: v }); },
+  async remove(k: string) { await chrome.storage.local.remove(k); },
 };
 
 class Workspace {
+  declare tabId: number | null;
+  declare statusEl: HTMLDivElement;
+  declare cell: Geometry['cell'];
+  declare history: HistoryEntry[];
+  declare configMeta: ConfigMeta;
+  declare detachedState: boolean;
+  declare renderQueued: boolean;
+  declare t: Engine;
+  declare tpm: Tpm;
+  declare router: KeyRouter;
+  declare overlays: WorkspaceOverlays;
+  declare view: PaneView;
+  declare runtime: ReturnType<Tmux['runtimeConfig']>;
+  declare statusTimer: ReturnType<typeof setInterval> | undefined;
+  declare saveTimer: ReturnType<typeof setTimeout> | undefined;
+  declare publishTimer: ReturnType<typeof setTimeout> | undefined;
+  declare historyTimer: ReturnType<typeof setTimeout> | undefined;
+
   constructor() {
     this.tabId = null;
-    this.statusEl = document.getElementById('status');
+    this.statusEl = document.getElementById('status') as HTMLDivElement;
     this.cell = { w: 8, h: 20 };
     this.history = [];
     this.configMeta = { label: '', error: null, lines: 0 };
@@ -44,20 +162,20 @@ class Workspace {
       console.warn('chrome-tmux: service worker registration failed', err);
     }
 
-    const t = new Tmux({ ui: this.uiAdapter(), loadFile: loadConfigFile });
+    const t = new Tmux({ ui: this.uiAdapter(), loadFile: loadConfigFile }) as Engine;
     this.t = t;
     this.tpm = new Tpm(t, { storage: chromeStorage });
     this.router = createRouter(() => this.runtime);
-    this.overlays = new Overlays(this);
+    this.overlays = new Overlays(this) as WorkspaceOverlays;
     this.view = new PaneView(t, {
-      panesEl: document.getElementById('panes'),
-      decorEl: document.getElementById('decor'),
-      shieldEl: document.getElementById('shield'),
+      panesEl: document.getElementById('panes') as HTMLDivElement,
+      decorEl: document.getElementById('decor') as HTMLDivElement,
+      shieldEl: document.getElementById('shield') as HTMLDivElement,
       onLauncherSubmit: (id, value) => this.launcherSubmit(id, value),
       history: () => this.history,
     });
 
-    this.history = (await chromeStorage.get(HISTORY_KEY)) || [];
+    this.history = ((await chromeStorage.get(HISTORY_KEY)) as HistoryEntry[] | undefined) || [];
     this.renderHistoryList();
     await t.loadDefaults();
     await this.loadConfig();
@@ -69,7 +187,7 @@ class Workspace {
     await this.tpm.runStartup({ hadLiveState });
     await this.tpm.loadMetaCache();
 
-    t.server.addEventListener('change', (e) => this.onChange(e.detail));
+    t.server.addEventListener('change', (e) => this.onChange((e as CustomEvent<string>).detail));
     // Startup hooks, in tmux's order: the session is created, then the client attaches.
     if (!hadLiveState) await t.fireHook('session-created');
     await t.fireHook('client-attached');
@@ -77,7 +195,7 @@ class Workspace {
     this.publishRuntime();
     this.render();
     this.startStatusTimer();
-    document.getElementById('boot').classList.add('done');
+    document.getElementById('boot')!.classList.add('done');
     this.focusPane();
     const errors = t.notices.filter((n) => n.level === 'error' && n.source !== '(defaults)').length;
     if (this.configMeta.error) this.overlays.message(this.configMeta.error, { duration: 6000 });
@@ -111,25 +229,25 @@ class Workspace {
     const mode = parseModeStyle(t.getOption('mode-style'));
     if (mode.bg) root.setProperty('--mode-bg', mode.bg);
     if (mode.fg) root.setProperty('--mode-fg', mode.fg);
-    const ctx = document.createElement('canvas').getContext('2d');
+    const ctx = document.createElement('canvas').getContext('2d')!;
     ctx.font = `${size}px ${t.getOption('@ctmux-font-family')}`;
     this.cell = { w: Math.max(4, ctx.measureText('M').width), h: lineH };
   }
 
   // ---------------------------------------------------------- UI adapter
 
-  uiAdapter() {
+  uiAdapter(): Ui {
     const self = this;
     return {
       geometry: () => ({ rect: self.view?.areaRect?.w ? self.view.areaRect : self.view?.area() || { x: 0, y: 0, w: 1200, h: 800 }, gap: GAP, cell: self.cell }),
       message: (text, opts) => self.overlays?.message(text, opts),
-      prompt: (opts) => self.overlays.prompt(opts),
-      confirm: (text, opts) => self.overlays.confirm(text, opts),
-      showList: (opts) => self.overlays.showList(opts),
+      prompt: (opts) => self.overlays.prompt(opts) as Promise<string | null>,
+      confirm: (text, opts) => self.overlays.confirm(text, opts) as Promise<boolean>,
+      showList: (opts) => self.overlays.showList(opts as Parameters<Overlays['showList']>[0]),
       showMessages: (tab) => self.overlays.debugPanel(tab || 'config'),
       chooseTree: (opts) => self.overlays.chooseTree(opts),
-      pick: (opts) => self.overlays.pick(opts),
-      displayPanes: (opts) => { self.render(); return self.overlays.displayPanes(opts); },
+      pick: (opts) => self.overlays.pick(opts as Parameters<Overlays['pick']>[0]),
+      displayPanes: (opts) => { self.render(); return self.overlays.displayPanes(opts as Parameters<Overlays['displayPanes']>[0]); },
       clock: (paneId) => { self.render(); self.overlays.clock(paneId); },
       copyMode: (paneId, opts) => self.enterCopyMode(paneId, opts),
       paneCommand: (paneId, msg) => self.paneCommand(paneId, msg),
@@ -139,7 +257,7 @@ class Workspace {
       refresh: () => { self.applyTheme(); self.render(); },
       writeClipboard: (text) => self.writeClipboard(text),
       readClipboard: async () => { try { return await navigator.clipboard.readText(); } catch { return ''; } },
-      menu: (opts) => self.overlays.menu(opts),
+      menu: (opts) => self.overlays.menu(opts as Parameters<Overlays['menu']>[0]),
       popup: (opts) => self.overlays.popup(opts),
       closePopup: () => self.overlays.closePopup(),
       promptHistory: () => self.overlays.promptHistory.slice(),
@@ -160,7 +278,7 @@ class Workspace {
 
   // ------------------------------------------------------------- rendering
 
-  onChange(reason) {
+  onChange(reason: string) {
     this.scheduleRender();
     this.scheduleSave();
     if (reason !== 'prefix') this.updateTitle();
@@ -183,7 +301,7 @@ class Workspace {
     renderStatus(this.t, this.statusEl, this.overlays?.statusOverlay || null);
   }
 
-  flashStatusHint(text) {
+  flashStatusHint(text: string) {
     this.overlays.message(text, { duration: 2000 });
   }
 
@@ -202,7 +320,7 @@ class Workspace {
     if (secs > 0) this.statusTimer = setInterval(() => this.renderStatus(), secs * 1000);
   }
 
-  renderPane(paneId, { navigate: nav } = {}) {
+  renderPane(paneId: number, { navigate: nav }: { navigate?: boolean } = {}) {
     const p = this.t.server.panes[paneId];
     if (!p) return;
     if (nav) this.view.navigate(p);
@@ -229,7 +347,7 @@ class Workspace {
     }, 50);
   }
 
-  async remember(url, title) {
+  async remember(url: string, title: string) {
     if (!url || !/^https?:|^file:/.test(url)) return;
     this.history = [{ url, title }, ...this.history.filter((h) => h.url !== url)].slice(0, 200);
     clearTimeout(this.historyTimer);
@@ -251,7 +369,7 @@ class Workspace {
   // ----------------------------------------------------------------- focus
 
   /** Move keyboard focus into the active pane (unless an overlay owns it). */
-  focusPane(paneId) {
+  focusPane(paneId?: number) {
     if (this.overlays?.active) return;
     // Synchronous on purpose: a keystroke arriving before a deferred focus
     // would otherwise re-select the previously focused pane.
@@ -262,11 +380,11 @@ class Workspace {
 
   /** Take focus away from pane iframes so the workspace sees keystrokes. */
   keySink() {
-    document.getElementById('keysink').focus();
+    document.getElementById('keysink')!.focus();
   }
 
   /** Make the pane that has (or just got) focus the active pane. */
-  syncActiveFromFocus(paneId) {
+  syncActiveFromFocus(paneId: number | null) {
     const srv = this.t.server;
     if (paneId == null || !srv.panes[paneId]) return;
     const loc = srv.locate(paneId);
@@ -289,20 +407,20 @@ class Workspace {
     window.addEventListener('blur', () => {
       setTimeout(() => {
         const a = document.activeElement;
-        if (a?.tagName === 'IFRAME' && !this.overlays.active) this.syncActiveFromFocus(Number(a.dataset.pane));
+        if (a?.tagName === 'IFRAME' && !this.overlays.active) this.syncActiveFromFocus(Number((a as HTMLIFrameElement).dataset.pane));
       }, 0);
     });
-    document.getElementById('panes').addEventListener('focusin', (e) => {
+    document.getElementById('panes')!.addEventListener('focusin', (e) => {
       const id = this.view.paneAt(e.target);
       if (id != null && !this.overlays.active) this.syncActiveFromFocus(id);
     });
     this.statusEl.addEventListener('mousedown', (e) => {
-      if (e.target.closest('input')) return;
+      if ((e.target as Element).closest('input')) return;
       e.preventDefault();
       if (this.overlays.statusOverlay?.message != null) { this.overlays.dismissMessage?.(); return; }
-      const win = e.target.closest('.win');
+      const win = (e.target as Element).closest<HTMLElement>('.win');
       if (win) {
-        const s = this.t.server.session;
+        const s = this.t.server.session!;
         const w = s.windows.find((x) => x.id === Number(win.dataset.window));
         if (w) { this.t.server.selectWindow(s, w); this.t.server.changed('click'); this.focusPane(); }
       } else {
@@ -326,7 +444,7 @@ class Workspace {
     });
   }
 
-  onKeyDown(e) {
+  onKeyDown(e: KeyboardEvent) {
     if (this.overlays.active) {
       this.overlays.onKey(e);
       return;
@@ -341,16 +459,16 @@ class Workspace {
     this.dispatchKey(r);
   }
 
-  async dispatchKey(r) {
+  async dispatchKey(r: KeyRoute) {
     try {
       await this.t.handleKey(r, {});
     } catch (err) {
-      this.overlays.message(String(err.message || err));
+      this.overlays.message(String((err as Error).message || err));
     }
     if (this.router.table === 'root' && this.t.keyTable !== 'root') this.setKeyTable('root');
   }
 
-  setKeyTable(name) {
+  setKeyTable(name: string) {
     this.t.keyTable = name;
     this.router.setTable(name);
     const p = this.t.server.pane;
@@ -358,7 +476,7 @@ class Workspace {
   }
 
   /** Map a message sender to a pane id. */
-  senderPane(msg, sender) {
+  senderPane(msg: AgentMessage, sender: chrome.runtime.MessageSender) {
     const panes = this.t.server.panes;
     if (msg.pane != null && panes[msg.pane]) {
       if (msg.root && sender.frameId != null) panes[msg.pane].frameId = sender.frameId;
@@ -366,10 +484,10 @@ class Workspace {
     }
     for (const p of Object.values(panes)) if (p.frameId != null && p.frameId === sender.frameId) return p.id;
     const a = document.activeElement;
-    return a?.tagName === 'IFRAME' ? Number(a.dataset.pane) : null;
+    return a?.tagName === 'IFRAME' ? Number((a as HTMLIFrameElement).dataset.pane) : null;
   }
 
-  onAgentMessage(msg, sender, sendResponse) {
+  onAgentMessage(msg: AgentMessage, sender: chrome.runtime.MessageSender, sendResponse: (response?: unknown) => void) {
     if (!msg || typeof msg.ctmux !== 'string' || msg.ctmux === 'register-workspace') return false;
     if (!sender.tab || sender.tab.id !== this.tabId) return false;
     const t = this.t;
@@ -422,12 +540,12 @@ class Workspace {
 
   // ---------------------------------------------------------- pane agents
 
-  async paneCommand(paneId, msg) {
+  async paneCommand(paneId: number, msg: UiOptions) {
     const p = this.t.server.panes[paneId];
     if (!p || p.kind !== 'web') {
       if (msg.type === 'paste' && p) {
         const v = this.view.els.get(paneId);
-        if (v?.input) { v.input.setRangeText(msg.text, v.input.selectionStart, v.input.selectionEnd, 'end'); v.input.focus(); }
+        if (v?.input) { v.input.setRangeText(msg.text, v.input.selectionStart!, v.input.selectionEnd!, 'end'); v.input.focus(); }
       }
       return null;
     }
@@ -439,7 +557,7 @@ class Workspace {
     }
   }
 
-  async enterCopyMode(paneId, opts = {}) {
+  async enterCopyMode(paneId: number, opts: UiOptions = {}) {
     const p = this.t.server.panes[paneId];
     if (!p || p.kind !== 'web') { this.overlays.message('copy-mode: pane has no page'); return; }
     const table = this.t.getOption('mode-keys') === 'vi' ? 'copy-mode-vi' : 'copy-mode';
@@ -450,7 +568,7 @@ class Workspace {
     this.view.focus(paneId);
   }
 
-  async writeClipboard(text) {
+  async writeClipboard(text: string) {
     try {
       await navigator.clipboard.writeText(text);
       return;
@@ -468,7 +586,7 @@ class Workspace {
 
   // ------------------------------------------------------------- lifecycle
 
-  launcherSubmit(paneId, value) {
+  launcherSubmit(paneId: number, value: string) {
     const v = value.trim();
     if (!v) return;
     if (v.startsWith(':')) {
@@ -498,20 +616,20 @@ class Workspace {
   }
 }
 
-function parseModeStyle(s) {
-  const out = {};
+function parseModeStyle(s: unknown) {
+  const out: { fg?: string | null; bg?: string | null } = {};
   for (const tok of String(s).split(/[,\s]+/)) {
     const m = /^(fg|bg)=(.+)$/.exec(tok);
-    if (m) out[m[1]] = colourToCss(m[2]);
+    if (m) out[m[1] as 'fg' | 'bg'] = colourToCss(m[2]);
   }
   return out;
 }
 
 const ws = new Workspace();
-window.ctmux = ws; // handy for debugging from DevTools
+(window as unknown as { ctmux: Workspace }).ctmux = ws; // handy for debugging from DevTools
 ws.boot().catch((err) => {
   console.error(err);
-  const boot = document.getElementById('boot');
+  const boot = document.getElementById('boot')!;
   boot.textContent = `chrome-tmux failed to start: ${err.message || err}`;
 });
 
