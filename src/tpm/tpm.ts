@@ -9,7 +9,9 @@
 import { toCommandList } from '../core/parser.js';
 import { registerCommand } from '../core/commands.js';
 import { EMULATORS } from './plugins/index.js';
-import type { CommandContext, Flags, KeyValueStorage, Pane, Ui } from '../core/types.js';
+import type { CommandContext, Flags, KeyValueStorage } from '../core/types.js';
+import type { Tmux, FormatVarFn, ShellVarFn, NoticeOptions, BindOptions, PasteBuffer } from '../core/tmux.js';
+import type { Server, Snapshot } from '../core/server.js';
 
 export type IntervalHandle = ReturnType<typeof setInterval>;
 
@@ -76,65 +78,16 @@ export interface StartupContext {
 
 export type StartupHook = (ctx: StartupContext) => unknown;
 
-export type FormatVarFn = (ctx: CommandContext) => string;
-export type ShellVarFn = (cmd: string) => string;
-
-export interface NoticeOptions {
-  source?: string;
-  line?: number;
-  level?: string;
-  key?: string;
-}
-
-export interface BindOptions {
-  repeat?: boolean;
-  note?: string;
-  origin?: string;
-}
-
-export interface PasteBuffer {
-  name: string;
-  data: string;
-  time: number;
-}
+export type { FormatVarFn, ShellVarFn, NoticeOptions, BindOptions, PasteBuffer };
 
 /** Layout/URL snapshot saved by the tmux-resurrect emulation (`server.snapshot()`). */
-export interface ResurrectSnapshot {
-  version: number;
-  savedAt: number;
-  current: string | null;
-  sessions: unknown[];
-}
+export type ResurrectSnapshot = Snapshot;
 
-/** The part of the server that TPM and the plugin emulators use. */
-export interface TpmServer {
-  readonly pane: (Pane & { mode?: unknown }) | null;
-  changed(reason?: string): void;
-  snapshot(): ResurrectSnapshot;
-  restore(snap: ResurrectSnapshot): number;
-}
+/** The server, as TPM and the plugin emulators see it. */
+export type TpmServer = Server;
 
-/** The part of the tmux engine (`Tmux`) that TPM and the plugin emulators use. */
-export interface TpmHost {
-  plugins: Tpm | null;
-  ui: Ui;
-  server: TpmServer;
-  options: Record<string, string>;
-  env: Record<string, string>;
-  formatVars: Map<string, FormatVarFn>;
-  shellVars: Map<RegExp, ShellVarFn>;
-  clientPrefix: boolean;
-  buffers: PasteBuffer[];
-  log(message: string, level?: string): void;
-  notice(message: string, opts?: NoticeOptions): void;
-  getOption(name: string): string;
-  setOption(name: string, value: unknown, origin?: string): void;
-  setDefaultOption(name: string, value: unknown, origin?: string): boolean;
-  bind(table: string, key: string, commands: unknown, opts?: BindOptions): string | null;
-  unbind(table: string, key: string): unknown;
-  lookupKey(table: string, key: string): unknown;
-  runString(str: string, ctx?: CommandContext): Promise<unknown>;
-}
+/** The tmux engine, as TPM and the plugin emulators see it. */
+export type TpmHost = Tmux;
 
 /** A command registered by a plugin emulator. */
 export interface PluginCommand {
@@ -237,7 +190,7 @@ export class Tpm {
   isActive(repo: string) { return this.applied.has(repo.toLowerCase()); }
 
   /** run-shell interception. Returns true when handled. */
-  async handleRun(cmd: string) {
+  async handleRun(cmd: string, _ctx?: CommandContext) {
     const c = cmd.trim().replace(/^['"]|['"]$/g, '');
     if (/(^|\/)tpm(\/tpm)?\s*$/.test(c) || /plugins\/tpm\/tpm/.test(c)) {
       this.ranTpm = true;

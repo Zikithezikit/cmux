@@ -75,10 +75,10 @@ export interface HookInfo {
 
 /** A wait-for channel. */
 export interface WaitChannel {
-  waiters: Array<() => void>;
+  waiters: Array<(value?: unknown) => void>;
   woken: boolean;
   locked: boolean;
-  lockers: Array<() => void>;
+  lockers: Array<(value?: unknown) => void>;
 }
 
 /** Callbacks registered by plugin emulators. */
@@ -153,21 +153,12 @@ export interface TmuxOptions {
   now?: () => Date;
 }
 
-/** A pane as the server stores it (copy mode sets `mode`). */
-export type ServerPane = Pane & { mode?: string | null };
-
-/** Server state fields used here (declared locally until server.ts is typed). */
-interface ServerFields {
-  sessions: Session[];
-  currentId: number | null;
-  lastSessionId: number | null;
-  panes: Record<number, ServerPane>;
-  created: number;
-}
+/** A pane as the server stores it. */
+export type ServerPane = Pane;
 
 type PrintFn = (line: string) => void;
 
-const { normalizeKey } = (globalThis as unknown as { CtmuxKeys: { normalizeKey(key: unknown): string | null } }).CtmuxKeys;
+const { normalizeKey } = globalThis.CtmuxKeys;
 
 /** tmux options that exist but have no meaning inside a browser. */
 const INERT_OPTIONS = new Set([
@@ -215,7 +206,7 @@ export class Tmux {
   declare waitChannels: Map<string, WaitChannel>;
   declare platform: string;
   declare pluginHooks: PluginHooks;
-  declare server: Server & ServerFields;
+  declare server: Server;
   declare sourcing: number;
 
   constructor({ ui, loadFile, now }: TmuxOptions = {}) {
@@ -241,7 +232,7 @@ export class Tmux {
     this.waitChannels = new Map();
     this.platform = guessPlatform();
     this.pluginHooks = { afterConfig: [], change: [], paneReport: [] };
-    this.server = new Server((name: string) => this.getOption(name)) as Server & ServerFields;
+    this.server = new Server((name: string) => this.getOption(name));
     this.server.addEventListener('change', () => this.pluginHooks.change.forEach((f) => f()));
     this.sourcing = 0;
   }
@@ -608,7 +599,7 @@ export class Tmux {
         let text = '';
         const print: PrintFn = (line) => { text += String(line) + '\n'; };
         try {
-          const r = await this.execute(argv, { ...ctx, print, fromShell: true } as unknown as CommandContext);
+          const r = await this.execute(argv, { ...ctx, print, fromShell: true });
           return { code: r === false ? 1 : 0, out: text };
         } catch (err) {
           return { code: 1, out: text, err: String((err as Error).message || err) };
@@ -628,7 +619,7 @@ export class Tmux {
 
   /** Emit lines: to the calling shell (`tmux show ...` inside run-shell) or a list overlay. */
   output(ctx: CommandContext | null | undefined, lines: string[], title?: string): void {
-    if (ctx?.print) { lines.forEach((l) => (ctx.print as unknown as PrintFn)(l)); return; }
+    if (ctx?.print) { lines.forEach((l) => ctx.print!(l)); return; }
     this.ui.showList({ title, lines });
   }
 
@@ -811,7 +802,7 @@ export class Tmux {
     fn.loop = (kind: string, flags = ''): FormatLoopItem[] => {
       const items: FormatLoopItem[] = [];
       if (kind === 'S' || kind === 'L') {
-        let list: Session[] = kind === 'L' ? [srv.session].filter(Boolean) : srv.sessions.slice();
+        let list: Session[] = kind === 'L' ? [srv.session].filter(Boolean) as Session[] : srv.sessions.slice();
         if (flags.includes('n')) list.sort((a, b) => a.name.localeCompare(b.name));
         else list.sort((a, b) => a.id - b.id);
         for (const s of list) items.push({ lookup: this.lookup({ session: s, loop: 'S' }), current: s === srv.session });

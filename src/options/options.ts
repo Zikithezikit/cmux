@@ -1,24 +1,13 @@
 import { Tmux } from '../core/tmux.js';
 import { Tpm, memoryStorage } from '../tpm/tpm.js';
+import type { TpmFetch, TpmTimers } from '../tpm/tpm.js';
+import type { Snapshot } from '../core/server.js';
 import {
   CONF_KEY, getConfRecord, setConfRecord, fileAccessAllowed, readLocalFile,
 } from '../shared/config-source.js';
-import type { Notice } from '../core/types.js';
-
-/** The stored configuration record (see src/shared/config-source.ts). */
-interface ConfRecord {
-  text?: string;
-  path?: string;
-  name?: string;
-  origin?: string;
-  updatedAt: number;
-}
 
 /** The parts of a tmux-resurrect snapshot this page shows. */
-interface ResurrectSnapshot {
-  savedAt: number;
-  sessions: unknown[];
-}
+type ResurrectSnapshot = Pick<Snapshot, 'savedAt' | 'sessions'>;
 
 /** The elements of options.html, by id. */
 interface OptionsElements {
@@ -40,12 +29,6 @@ interface OptionsElements {
 }
 
 type Child = Node | string | number | boolean | null | undefined;
-
-/** Engine state the report reads (Tmux is not typed yet). */
-interface ReportEngine {
-  tables: Map<string, Map<string, { origin: string }>>;
-  notices: Notice[];
-}
 
 const $ = <K extends keyof OptionsElements>(id: K) => document.getElementById(id) as OptionsElements[K];
 const WORKSPACE = chrome.runtime.getURL('src/workspace/workspace.html');
@@ -70,8 +53,8 @@ async function report(text: string) {
   const box = $('report');
   box.textContent = '';
   if (!text) { box.append(el('p', { class: 'hint' }, 'No configuration loaded — built-in tmux defaults (prefix C-b) will be used.')); return; }
-  const t = new Tmux({ loadFile: async () => '' }) as Tmux & ReportEngine;
-  const tpm = new Tpm(t, { storage: memoryStorage(), fetchImpl: async () => ({ ok: false, status: 0 }), timers: { setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout } });
+  const t = new Tmux({ loadFile: async () => '' });
+  const tpm = new Tpm(t, { storage: memoryStorage(), fetchImpl: (async () => ({ ok: false, status: 0 })) as unknown as TpmFetch, timers: { setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout } as TpmTimers });
   await t.loadDefaults();
   await t.runConfig(text, { source: '~/.tmux.conf' });
   tpm.finish();
@@ -103,11 +86,11 @@ async function report(text: string) {
 }
 
 async function refresh() {
-  const rec = await getConfRecord() as ConfRecord | null;
+  const rec = await getConfRecord();
   $('text').value = rec?.text || '';
   if (rec?.path) $('path').value = rec.path;
   $('source-label').textContent = rec
-    ? `Current source: ${rec.path || rec.name || 'pasted text'} (saved ${new Date(rec.updatedAt).toLocaleString()})`
+    ? `Current source: ${rec.path || rec.name || 'pasted text'} (saved ${new Date(rec.updatedAt as number).toLocaleString()})`
     : 'No configuration saved yet.';
   await report(rec?.text || '');
 }
@@ -148,7 +131,7 @@ async function init() {
   });
 
   $('save-text').addEventListener('click', async () => {
-    const rec = await getConfRecord() as ConfRecord | null;
+    const rec = await getConfRecord();
     const text = $('text').value;
     if (rec?.path) {
       status('Saved text replaces the disk path: the workspace will use this text from now on.');

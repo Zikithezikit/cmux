@@ -4,19 +4,15 @@ import { readFileSync } from 'node:fs';
 import { Tmux } from '../src/core/tmux.js';
 import { Tpm, memoryStorage, parsePluginSpec } from '../src/tpm/tpm.js';
 import { panesInOrder } from '../src/core/layout.js';
-import type { Server } from '../src/core/server.js';
-import type { KeyValueStorage, Notice, Pane, SplitNode, Ui, Window as TmuxWindow } from '../src/core/types.js';
+import type { TpmFetch, TpmTimers } from '../src/tpm/tpm.js';
+import type { KeyValueStorage, SplitNode, Ui, Window as TmuxWindow } from '../src/core/types.js';
 
 /** A stub UI: records messages; any method it doesn't define is a no-op. */
 type StubUi = Ui & { messages: string[] };
 type StubOverrides = { [K in keyof Ui]?: (...args: never[]) => unknown };
 
-/** The engine as these tests use it (fields Tmux and Server set up in their constructors). */
-type Engine = Tmux & {
-  server: Server & { panes: Record<number, Pane> };
-  notices: Notice[];
-  handleKey(ev: { table: string; key: string; prefix?: boolean }): Promise<unknown>;
-};
+/** The engine with the stub UI. */
+type Engine = Tmux & { ui: StubUi };
 
 interface BootOptions {
   ui?: StubUi;
@@ -25,7 +21,7 @@ interface BootOptions {
 }
 
 const fixture = readFileSync(new URL('./fixtures/user.tmux.conf', import.meta.url), 'utf8');
-const timers = { setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout };
+const timers = { setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout } as unknown as TpmTimers;
 
 function stubUi(extra: StubOverrides = {}) {
   const messages: string[] = [];
@@ -42,7 +38,7 @@ function stubUi(extra: StubOverrides = {}) {
 
 async function boot(conf: string, { ui = stubUi(), storage = memoryStorage(), fetchImpl }: BootOptions = {}) {
   const t = new Tmux({ ui }) as Engine;
-  const tpm = new Tpm(t, { storage, timers, fetchImpl: fetchImpl || (async () => ({ ok: true, text: async () => 'Sunny +21°C' })) });
+  const tpm = new Tpm(t, { storage, timers, fetchImpl: (fetchImpl || (async () => ({ ok: true, text: async () => 'Sunny +21°C' }))) as unknown as TpmFetch });
   await t.loadDefaults();
   if (conf) await t.runConfig(conf, { source: 'test.conf' });
   tpm.finish();
@@ -208,7 +204,7 @@ test('GitHub metadata is fetched once and cached', async () => {
   await tpm.fetchMetadata();
   await tpm.fetchMetadata();
   assert.equal(calls, 1);
-  assert.equal(tpm.report()[0].meta.fullName, 'dracula/tmux');
+  assert.equal(tpm.report()[0].meta!.fullName, 'dracula/tmux');
 });
 
 test('server state round-trips through JSON', async () => {

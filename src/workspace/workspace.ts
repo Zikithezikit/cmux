@@ -9,90 +9,13 @@ import { loadMainConfig, loadConfigFile, CONF_KEY } from '../shared/config-sourc
 import { renderStatus } from './status.js';
 import { PaneView, GAP } from './panes.js';
 import { Overlays } from './overlays.js';
-import type { HistoryEntry, PaneViewServer } from './panes.js';
-import type { CommandContext, Geometry, KeyValueStorage, Notice, Pane, Session, Ui, UiOptions, Window as TmuxWindow } from '../core/types.js';
+import type { HistoryEntry } from './panes.js';
+import type { ServerState } from '../core/server.js';
+import type { ConfigInfo, PromptOptions } from './overlays.js';
+import type { Geometry, KeyValueStorage, Ui, UiOptions } from '../core/types.js';
 
 /** A key the router (src/shared/keys.ts) says the workspace should execute. */
-interface KeyRoute {
-  table: string;
-  key: string;
-  prefix?: boolean;
-}
-
-interface KeyRouter {
-  feed(input: string | KeyboardEvent): KeyRoute | null;
-  readonly table: string;
-  setTable(name: string): void;
-  reset(): void;
-}
-
-/** globalThis.CtmuxKeys, installed by the classic script src/shared/keys.js. */
-interface CtmuxKeysApi {
-  normalizeKey(str: unknown): string | null;
-  eventToKey(e: KeyboardEvent): string | null;
-  createRouter(getConfig: () => unknown, now?: () => number): KeyRouter;
-}
-
-/** Pane fields the workspace adds on top of the engine's Pane. */
-interface WorkspacePane extends Pane {
-  /** Frame id of the pane's iframe in this tab, learned from its agent. */
-  frameId?: number;
-  manualTitle?: boolean;
-  mode?: string | null;
-}
-
-interface PasteBuffer {
-  name: string;
-  data: string;
-  time: number;
-}
-
-/** The server surface this page uses (Server is not typed yet). */
-interface WorkspaceServer extends PaneViewServer {
-  sessions: Session[];
-  panes: Record<number, WorkspacePane>;
-  readonly session: Session | null;
-  readonly window: TmuxWindow | null;
-  readonly pane: WorkspacePane | null;
-  load(json: unknown): boolean;
-  newSession(opts: { name?: string; url?: string; prefill?: string; windowName?: string }): Session;
-  toJSON(): unknown;
-  locate(paneId: number): { session: Session; window: TmuxWindow } | null;
-  selectWindow(session: Session, window: TmuxWindow): void;
-  selectPane(window: TmuxWindow, paneId: number): void;
-  addEventListener: EventTarget['addEventListener'];
-}
-
-/**
- * The engine as this page uses it: Tmux plus the state fields its constructor
- * sets, with the signatures of the methods whose optional parameters are not
- * typed yet.
- */
-type Engine = Omit<Tmux, 'notice' | 'expandPlain' | 'handleKey'> & {
-  notice(message: string, opts?: { source?: string; line?: number; level?: string; key?: string }): void;
-  expandPlain(fmt: unknown, ctx?: CommandContext, opts?: { time?: boolean }): string;
-  handleKey(r: KeyRoute, ctx?: CommandContext): Promise<unknown>;
-  server: WorkspaceServer;
-  notices: Notice[];
-  buffers: PasteBuffer[];
-  keyTable: string;
-  sourcing: number;
-};
-
-/** `overlay` argument of renderStatus(): null, { message, style } or { prompt, command }. */
-interface StatusOverlay {
-  message?: string;
-  style?: string;
-  prompt?: HTMLElement;
-  command?: string;
-}
-
-/** Overlays plus the state fields its constructor and methods set. */
-type WorkspaceOverlays = Overlays & {
-  promptHistory: string[];
-  statusOverlay: StatusOverlay | null;
-  dismissMessage?: () => void;
-};
+type KeyRoute = CtmuxRoute;
 
 /** Messages pane agents (src/content/pane-agent.ts) send to the workspace. */
 type AgentMessage = { pane?: number | null; root?: boolean } & (
@@ -105,13 +28,9 @@ type AgentMessage = { pane?: number | null; root?: boolean } & (
   | { ctmux: 'paste-request' }
 );
 
-interface ConfigMeta {
-  label: string;
-  error: string | null;
-  lines: number;
-}
+type ConfigMeta = ConfigInfo;
 
-const { createRouter } = (globalThis as unknown as { CtmuxKeys: CtmuxKeysApi }).CtmuxKeys;
+const { createRouter } = globalThis.CtmuxKeys;
 const RUNTIME_KEY = 'ctmux:runtime';
 const HISTORY_KEY = 'ctmux:history';
 
@@ -129,10 +48,10 @@ class Workspace {
   declare configMeta: ConfigMeta;
   declare detachedState: boolean;
   declare renderQueued: boolean;
-  declare t: Engine;
+  declare t: Tmux;
   declare tpm: Tpm;
-  declare router: KeyRouter;
-  declare overlays: WorkspaceOverlays;
+  declare router: CtmuxKeyRouter;
+  declare overlays: Overlays;
   declare view: PaneView;
   declare runtime: ReturnType<Tmux['runtimeConfig']>;
   declare statusTimer: ReturnType<typeof setInterval> | undefined;
@@ -162,11 +81,11 @@ class Workspace {
       console.warn('chrome-tmux: service worker registration failed', err);
     }
 
-    const t = new Tmux({ ui: this.uiAdapter(), loadFile: loadConfigFile }) as Engine;
+    const t = new Tmux({ ui: this.uiAdapter(), loadFile: loadConfigFile });
     this.t = t;
     this.tpm = new Tpm(t, { storage: chromeStorage });
     this.router = createRouter(() => this.runtime);
-    this.overlays = new Overlays(this) as WorkspaceOverlays;
+    this.overlays = new Overlays(this);
     this.view = new PaneView(t, {
       panesEl: document.getElementById('panes') as HTMLDivElement,
       decorEl: document.getElementById('decor') as HTMLDivElement,
@@ -182,7 +101,7 @@ class Workspace {
     this.applyTheme();
 
     const saved = this.tabId != null ? (await chrome.storage.session.get(this.stateKey()))[this.stateKey()] : null;
-    const hadLiveState = t.server.load(saved);
+    const hadLiveState = t.server.load(saved as Partial<ServerState> | null);
     if (!hadLiveState) t.server.newSession({});
     await this.tpm.runStartup({ hadLiveState });
     await this.tpm.loadMetaCache();
@@ -241,7 +160,7 @@ class Workspace {
     return {
       geometry: () => ({ rect: self.view?.areaRect?.w ? self.view.areaRect : self.view?.area() || { x: 0, y: 0, w: 1200, h: 800 }, gap: GAP, cell: self.cell }),
       message: (text, opts) => self.overlays?.message(text, opts),
-      prompt: (opts) => self.overlays.prompt(opts) as Promise<string | null>,
+      prompt: (opts) => self.overlays.prompt(opts as PromptOptions),
       confirm: (text, opts) => self.overlays.confirm(text, opts) as Promise<boolean>,
       showList: (opts) => self.overlays.showList(opts as Parameters<Overlays['showList']>[0]),
       showMessages: (tab) => self.overlays.debugPanel(tab || 'config'),

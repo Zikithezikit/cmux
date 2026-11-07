@@ -7,13 +7,7 @@ import * as L from '../src/core/layout.js';
 import { toUrl } from '../src/core/commands.js';
 import type { LayoutNode, LayoutRects, SplitNode } from '../src/core/types.js';
 
-/** The parts of keys.js's global (a classic script) these tests use. */
-interface CtmuxKeysApi {
-  normalizeKey(str: string): string | null;
-  createRouter(getConfig: () => unknown, now: () => number): { feed(key: string): unknown; table: string };
-}
-
-const { normalizeKey, createRouter } = (globalThis as unknown as { CtmuxKeys: CtmuxKeysApi }).CtmuxKeys;
+const { normalizeKey, createRouter } = globalThis.CtmuxKeys;
 
 test('normalizeKey canonicalises tmux key names', () => {
   assert.equal(normalizeKey('C-s'), 'C-s');
@@ -90,7 +84,7 @@ test('formats: variables, conditionals, comparisons, truncation, styles', () => 
   assert.equal(expandFormat('#{?client_prefix,#[bg=yellow],}x', look), '#[bg=yellow]x');
   assert.equal(expandFormat('a#,b ##', look), 'a,b ##');
   assert.equal(expandFormat('#{e|+|:2,3}', look), '5');
-  const runs = toRuns('#[fg=red]a#[default]b##', { fg: null, bg: '#000', attrs: {} } as unknown as Parameters<typeof toRuns>[1]);
+  const runs = toRuns('#[fg=red]a#[default]b##', { fg: null, bg: '#000', attrs: {} });
   assert.equal(runs.length, 2);
   assert.equal(runs[0].style.fg, colourToCss('red'));
   assert.equal(runs[1].text, 'b#');
@@ -117,11 +111,11 @@ test('layout: split, remove, rects, neighbours, resize, presets', () => {
   assert.equal(L.neighbour(panes, 1, 'L'), 2, 'wraps around');
 
   const r = L.resizePane(t, 1, 'R', 100, area, 1);
-  assert.ok((L.computeRects(r, area, 1) as LayoutRects).panes[1].w > 590);
+  assert.ok(L.computeRects(r, area, 1).panes[1].w > 590);
   const r2 = L.resizePane(t, 2, 'L', 100, area, 1);
-  assert.ok((L.computeRects(r2, area, 1) as LayoutRects).panes[2].w > 590, 'last child moves its left border');
+  assert.ok(L.computeRects(r2, area, 1).panes[2].w > 590, 'last child moves its left border');
 
-  t = L.removePane(t, 2);
+  t = L.removePane(t, 2)!;
   assert.deepEqual(L.panesInOrder(t), [1, 3]);
   assert.equal((t as SplitNode).dir, 'h');
   assert.equal(L.removePane(L.leaf(1), 1), null);
@@ -130,7 +124,7 @@ test('layout: split, remove, rects, neighbours, resize, presets', () => {
   assert.equal((tiled as SplitNode).children.length, 2);
   const mv = L.presetLayout('main-vertical', [1, 2, 3], 0.6);
   assert.equal((mv as SplitNode).dir, 'h');
-  assert.deepEqual(L.panesInOrder(L.rotate(L.presetLayout('even-horizontal', [1, 2, 3]))), [3, 1, 2]);
+  assert.deepEqual(L.panesInOrder(L.rotate(L.presetLayout('even-horizontal', [1, 2, 3])!)), [3, 1, 2]);
 });
 
 test('toUrl understands URLs, hosts, paths and search terms', () => {
