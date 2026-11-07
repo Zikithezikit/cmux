@@ -1,27 +1,45 @@
-// @ts-nocheck
 // Where the user's tmux.conf comes from. The options page stores either a
 // filesystem path (read through file:// — needs "Allow access to file URLs")
 // or the file's text (uploaded or pasted). Shared by the workspace and options page.
 
 export const CONF_KEY = 'ctmux:conf';
 
-export async function getConfRecord() {
-  return (await chrome.storage.local.get(CONF_KEY))[CONF_KEY] || null;
+/** What the options page stores under CONF_KEY. */
+export interface ConfRecord {
+  /** Filesystem path, re-read through file:// on load. */
+  path?: string;
+  /** The file's text (last read copy, upload or paste). */
+  text?: string;
+  /** Uploaded file name. */
+  name?: string;
+  /** 'path' | 'upload' | 'paste'. */
+  origin?: string;
+  updatedAt?: number;
 }
 
-export async function setConfRecord(rec) {
+export interface MainConfig {
+  text: string;
+  label: string;
+  error: string | null;
+}
+
+export async function getConfRecord(): Promise<ConfRecord | null> {
+  return ((await chrome.storage.local.get(CONF_KEY))[CONF_KEY] as ConfRecord | undefined) || null;
+}
+
+export async function setConfRecord(rec: ConfRecord): Promise<void> {
   await chrome.storage.local.set({ [CONF_KEY]: { ...rec, updatedAt: Date.now() } });
 }
 
-export function fileAccessAllowed() {
-  return new Promise((resolve) => {
+export function fileAccessAllowed(): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
     try { chrome.extension.isAllowedFileSchemeAccess(resolve); } catch { resolve(false); }
   });
 }
 
 /** Read a local file through file://. fetch() rejects file: URLs, XHR does not. */
-export function readLocalFile(path) {
-  return new Promise((resolve, reject) => {
+export function readLocalFile(path: string): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     const url = 'file://' + path.split('/').map(encodeURIComponent).join('/');
     xhr.open('GET', url);
@@ -35,12 +53,12 @@ export function readLocalFile(path) {
 }
 
 /** Infer $HOME from the configured path (/home/me/.tmux.conf → /home/me). */
-export function homeFromPath(path) {
+export function homeFromPath(path: string | null | undefined): string | null {
   const m = /^(\/(?:home|Users)\/[^/]+|\/root)(?:\/|$)/.exec(path || '');
   return m ? m[1] : null;
 }
 
-export function expandHome(path, home) {
+export function expandHome(path: string, home: string | null | undefined): string {
   if (!home) return path;
   return path.replace(/^~(?=\/|$)/, home).replace(/^\$HOME(?=\/|$)/, home).replace(/^\$\{HOME\}(?=\/|$)/, home);
 }
@@ -51,7 +69,7 @@ const MAIN_CONF = [/^~\/\.tmux\.conf$/, /^~\/\.config\/tmux\/tmux\.conf$/, /^\$X
  * Load the main configuration. Re-reads from disk when a path is configured,
  * falling back to the stored copy. Returns { text, label, error }.
  */
-export async function loadMainConfig() {
+export async function loadMainConfig(): Promise<MainConfig> {
   const rec = await getConfRecord();
   if (!rec) return { text: '', label: 'none (built-in defaults — load your ~/.tmux.conf in the extension options)', error: null };
   if (rec.path) {
@@ -63,7 +81,7 @@ export async function loadMainConfig() {
       return {
         text: rec.text || '',
         label: `${rec.path} (cached copy)`,
-        error: `could not re-read ${rec.path}: ${err.message}`,
+        error: `could not re-read ${rec.path}: ${(err as Error).message}`,
       };
     }
   }
@@ -71,7 +89,7 @@ export async function loadMainConfig() {
 }
 
 /** Loader for `source-file <path>`. */
-export async function loadConfigFile(path) {
+export async function loadConfigFile(path: string): Promise<string> {
   const rec = await getConfRecord();
   const home = homeFromPath(rec?.path);
   const isMain = MAIN_CONF.some((re) => re.test(path)) || (rec?.path && expandHome(path, home) === rec.path);
