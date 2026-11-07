@@ -60,6 +60,12 @@ export interface Pane {
   url: string;
   title: string;
   prefill?: string;
+  /** Set while the pane is in copy mode. */
+  mode?: string | null;
+  /** Chrome frame id of the pane's iframe, once its agent reported in. */
+  frameId?: number;
+  /** The title was set by select-pane -T and is not overwritten by page titles. */
+  manualTitle?: boolean;
 }
 
 export interface Window {
@@ -74,6 +80,8 @@ export interface Window {
   last: number | null;
   zoomed: boolean;
   layoutName: string | null;
+  /** The layout before the last select-layout (for select-layout -o). */
+  prevLayout?: LayoutNode;
 }
 
 export interface Session {
@@ -122,11 +130,11 @@ export interface CommandContext {
   fromConfig?: boolean;
   fromKey?: boolean;
   fromShell?: boolean;
-  /** Throw errors instead of reporting them (used by the shell's `tmux …`). */
-  print?: boolean;
+  /** Collects output lines (and makes errors throw), e.g. for the shell's `tmux …`. */
+  print?: (line: string) => void;
   invokedAs?: string;
-  session?: Session | number | null;
-  window?: Window | number | null;
+  session?: Session | null;
+  window?: Window | null;
   pane?: number | null;
   depth?: number;
   aliasDepth?: number;
@@ -147,7 +155,7 @@ export type UiOptions = Record<string, any>;
 export interface Ui {
   geometry(): Geometry;
   message(text: string, opts?: UiOptions): void;
-  prompt(opts: UiOptions): Promise<string | null>;
+  prompt(opts: UiOptions): Promise<string[] | null>;
   confirm(text: string, opts?: UiOptions): Promise<boolean>;
   showList(opts: UiOptions): unknown;
   showMessages(tab?: string): unknown;
@@ -157,7 +165,7 @@ export interface Ui {
   clock(paneId: number): void;
   copyMode(paneId: number, opts?: UiOptions): unknown;
   paneCommand(paneId: number, msg: UiOptions): unknown;
-  focusPane(paneId: number): void;
+  focusPane(paneId?: number): void;
   renderPane(paneId: number, opts?: UiOptions): void;
   detach(): void;
   refresh(): void;
@@ -174,7 +182,7 @@ export interface Ui {
   setKeyTable(name: string): void;
   keysChanged(): void;
   optionChanged(name: string): void;
-  configReloaded(): void;
+  configReloaded(source?: string): void;
   messages?(): unknown;
 }
 
