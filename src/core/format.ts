@@ -3,7 +3,7 @@
 
 /** A format variable lookup, optionally able to loop over and test for items. */
 export interface FormatLookup {
-  (name: string): unknown;
+  (name: string): Stringish;
   loop?(kind: string, flags: string): FormatLoopItem[];
   exists?(kind: string, name: string): boolean;
 }
@@ -42,7 +42,7 @@ export interface StyleCss {
 /** A value that format/colour functions coerce to a string. */
 export type Stringish = string | number | boolean | null | undefined;
 
-const SHORT_ALIASES: Record<string, string> = {
+const SHORT_ALIASES: Readonly<Record<string, string>> = {
   S: 'session_name', I: 'window_index', W: 'window_name', P: 'pane_index',
   T: 'pane_title', D: 'pane_id', F: 'window_flags', H: 'host', h: 'host_short',
 };
@@ -82,7 +82,7 @@ function splitTop(s: string): string[] {
     const c = s[i];
     if (c === '#' && (s[i + 1] === '{' || s[i + 1] === '[')) {
       const end = findClose(s, i + 2, s[i + 1], s[i + 1] === '{' ? '}' : ']');
-      if (end === -1) { cur += s.slice(i); i = s.length; break; }
+      if (end === -1) { cur += s.slice(i); break; }
       cur += s.slice(i, end + 1);
       i = end;
       continue;
@@ -158,7 +158,7 @@ function value(name: string, lookup: FormatLookup, depth: number): string {
 
 function evalExpr(expr: string, lookup: FormatLookup, depth: number): string {
   // Conditional: ?cond,a,b  (and ?c1,v1,c2,v2,else)
-  if (expr[0] === '?') {
+  if (expr.startsWith('?')) {
     const parts = splitTop(expr.slice(1));
     for (let k = 0; k + 1 < parts.length; k += 2) {
       const cond = parts[k];
@@ -243,7 +243,7 @@ function applyModifiers(mods: string, rest: string, lookup: FormatLookup, depth:
   // #{a:98}, #{c:red}: a literal argument is allowed when it isn't a variable.
   if (!rest.includes('#') && lookup(rest) == null && list.every((x) => x === 'a' || x === 'c' || x === 'w')) v = rest;
   for (const mod of list) {
-    let mm;
+    let mm: RegExpExecArray | null;
     if ((mm = /^=(\/)?(-?\d+)(?:\/(.*))?$/.exec(mod))) {
       const n = Number(mm[2]);
       const marker = mm[3] || '';
@@ -256,7 +256,8 @@ function applyModifiers(mods: string, rest: string, lookup: FormatLookup, depth:
     } else if ((mm = /^s\/((?:\\\/|[^/])*)\/((?:\\\/|[^/])*)\/?(i)?$/.exec(mod))) {
       try { v = v.replace(new RegExp(mm[1], 'g' + (mm[3] || '')), mm[2].replace(/\\(\d)/g, '$$$1')); } catch { /* bad regexp */ }
     } else if (mod === 'b') {
-      v = v.replace(/\/+$/, '').split('/').pop()!;
+      const parts = v.replace(/\/+$/, '').split('/');
+      v = parts[parts.length - 1];
     } else if (mod === 'd') {
       v = v.replace(/\/[^/]*\/?$/, '') || '/';
     } else if (mod === 'n') {
@@ -303,10 +304,10 @@ function globToRegExp(glob: string, flags: string): RegExp {
 
 // ---------------------------------------------------------------- strftime
 
-const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
+const DAYS: readonly string[] = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTHS: readonly string[] = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
   'September', 'October', 'November', 'December'];
-const pad = (n: unknown, w = 2, c = '0'): string => String(n).padStart(w, c);
+const pad = (n: number, w = 2, c = '0'): string => String(n).padStart(w, c);
 
 export function strftime(fmt: string, d: Date = new Date()): string {
   if (!fmt.includes('%')) return fmt;
@@ -319,11 +320,11 @@ export function strftime(fmt: string, d: Date = new Date()): string {
       d: pad(d.getDate()), e: pad(d.getDate(), 2, ' '), D: `${pad(d.getMonth() + 1)}/${pad(d.getDate())}/${pad(d.getFullYear() % 100)}`,
       F: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
       H: pad(d.getHours()), I: pad(h12), k: pad(d.getHours(), 2, ' '), l: pad(h12, 2, ' '),
-      j: pad(Math.floor((d as unknown as number - (new Date(d.getFullYear(), 0, 1) as unknown as number)) / 864e5) + 1, 3),
+      j: pad(Math.floor((d.getTime() - new Date(d.getFullYear(), 0, 1).getTime()) / 864e5) + 1, 3),
       m: pad(d.getMonth() + 1), M: pad(d.getMinutes()), n: '\n', t: '\t',
       p: d.getHours() < 12 ? 'AM' : 'PM', P: d.getHours() < 12 ? 'am' : 'pm',
       r: `${pad(h12)}:${pad(d.getMinutes())}:${pad(d.getSeconds())} ${d.getHours() < 12 ? 'AM' : 'PM'}`,
-      R: `${pad(d.getHours())}:${pad(d.getMinutes())}`, s: String(Math.floor(d as unknown as number / 1000)),
+      R: `${pad(d.getHours())}:${pad(d.getMinutes())}`, s: String(Math.floor(d.getTime() / 1000)),
       S: pad(d.getSeconds()), T: `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`,
       u: String(d.getDay() || 7), w: String(d.getDay()), y: pad(d.getFullYear() % 100), Y: String(d.getFullYear()),
       x: d.toLocaleDateString(), X: d.toLocaleTimeString(),
@@ -341,11 +342,11 @@ export function strftime(fmt: string, d: Date = new Date()): string {
 
 // ------------------------------------------------------------------ colours
 
-const BASE16 = [
+const BASE16: readonly string[] = [
   '#000000', '#cd3131', '#0dbc79', '#e5e510', '#2472c8', '#bc3fbc', '#11a8cd', '#e5e5e5',
   '#666666', '#f14c4c', '#23d18b', '#f5f543', '#3b8eea', '#d670d6', '#29b8db', '#ffffff',
 ];
-const NAMES = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white'];
+const NAMES: readonly string[] = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white'];
 
 function colour256(n: number): string {
   if (n < 16) return BASE16[n];
@@ -365,7 +366,7 @@ export function colourToCss(c: Stringish): string | null {
   c = String(c).trim().toLowerCase();
   if (c === 'default' || c === 'terminal') return null;
   if (/^#[0-9a-f]{6}$/.test(c) || /^#[0-9a-f]{3}$/.test(c)) return c;
-  let m;
+  let m: RegExpExecArray | null;
   if ((m = /^colou?r(\d{1,3})$/.exec(c))) return colour256(Math.min(255, Number(m[1])));
   const idx = NAMES.indexOf(c);
   if (idx !== -1) return BASE16[idx];
@@ -377,7 +378,7 @@ export function colourToCss(c: Stringish): string | null {
 
 // ------------------------------------------------------------------- styles
 
-const ATTRS = ['bright', 'bold', 'dim', 'underscore', 'blink', 'reverse', 'hidden', 'italics', 'strikethrough', 'overline'];
+const ATTRS: readonly string[] = ['bright', 'bold', 'dim', 'underscore', 'blink', 'reverse', 'hidden', 'italics', 'strikethrough', 'overline'];
 
 export function emptyStyle(): Style {
   return { fg: null, bg: null, attrs: {} };
@@ -386,7 +387,7 @@ export function emptyStyle(): Style {
 /** Apply a tmux style string (e.g. "fg=red,bg=default,bold") to `style`. */
 export function applyStyle(style: Style, str: unknown, base: Style = emptyStyle()): Style {
   const s: Style = { fg: style.fg, bg: style.bg, attrs: { ...style.attrs } };
-  for (let tok of String(str || '').split(/[\s,]+/)) {
+  for (let tok of styleText(str).split(/[\s,]+/)) {
     tok = tok.trim();
     if (!tok) continue;
     const lower = tok.toLowerCase();
@@ -414,6 +415,19 @@ export function applyStyle(style: Style, str: unknown, base: Style = emptyStyle(
   return s;
 }
 
+/**
+ * The text of a style option value. Options hold strings (or numbers, or arrays
+ * that stringify comma-joined); any other object would stringify to
+ * "[object Object]", whose tokens match no style keyword, so it reads as empty.
+ */
+function styleText(str: unknown): string {
+  if (!str) return '';
+  if (typeof str === 'string') return str;
+  if (typeof str === 'number' || typeof str === 'boolean' || typeof str === 'bigint') return String(str);
+  if (Array.isArray(str)) return (str as unknown[]).map(styleText).join(',');
+  return '';
+}
+
 export function parseStyle(str: unknown, base: Style = emptyStyle()): Style {
   return applyStyle(base, str, base);
 }
@@ -425,7 +439,7 @@ export function toRuns(expanded: string, base: Style = emptyStyle()): Run[] {
   const runs: Run[] = [];
   let style = base;
   let buf = '';
-  const flush = () => { if (buf) { runs.push({ text: buf, style }); buf = ''; } };
+  const flush = (): void => { if (buf) { runs.push({ text: buf, style }); buf = ''; } };
   for (let i = 0; i < expanded.length; i++) {
     const c = expanded[i];
     if (c === '#' && expanded[i + 1] === '#') { buf += '#'; i++; continue; }
@@ -445,7 +459,7 @@ export function toRuns(expanded: string, base: Style = emptyStyle()): Run[] {
 }
 
 /** Visible length of runs. */
-export function runsLength(runs: Run[]): number {
+export function runsLength(runs: readonly Run[]): number {
   return runs.reduce((n, r) => n + [...r.text].length, 0);
 }
 

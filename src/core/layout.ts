@@ -18,7 +18,8 @@ export interface SplitOptions {
 
 export const leaf = (id: number): PaneNode => ({ type: 'pane', id });
 
-const clone = <T>(n: T): T => JSON.parse(JSON.stringify(n));
+// Layout trees are plain JSON data, so a JSON round trip is a deep copy of the same type.
+const clone = <T extends LayoutNode>(n: T): T => JSON.parse(JSON.stringify(n)) as T;
 
 export function panesInOrder(node: LayoutNode | null | undefined, out: number[] = []): number[] {
   if (!node) return out;
@@ -37,14 +38,25 @@ export function findPath(node: LayoutNode, id: number, path: number[] = []): num
   return null;
 }
 
-function at(node: LayoutNode, path: number[]): LayoutNode {
-  for (const i of path) node = (node as SplitNode).children[i];
+/** Narrow a node to a split; a path through a pane is a caller bug. */
+function asSplit(node: LayoutNode): SplitNode {
+  if (node.type !== 'split') throw new TypeError(`layout node is pane ${node.id}, not a split`);
   return node;
+}
+
+function at(node: LayoutNode, path: readonly number[]): LayoutNode {
+  for (const i of path) node = asSplit(node).children[i];
+  return node;
+}
+
+/** The split node at `path`. */
+function splitAt(node: LayoutNode, path: readonly number[]): SplitNode {
+  return asSplit(at(node, path));
 }
 
 function normalize(node: LayoutNode): LayoutNode {
   if (node.type === 'pane') return node;
-  let children: LayoutNode[] = [];
+  const children: LayoutNode[] = [];
   let sizes: number[] = [];
   node.children.forEach((c, i) => {
     c = normalize(c);
@@ -80,7 +92,7 @@ export function splitPane(tree: LayoutNode | null | undefined, targetId: number,
   const path = findPath(t, targetId);
   if (!path) throw new Error(`no pane ${targetId}`);
   if (path.length) {
-    const parent = at(t, path.slice(0, -1)) as SplitNode;
+    const parent = splitAt(t, path.slice(0, -1));
     const idx = path[path.length - 1];
     if (parent.dir === dir) {
       const s = parent.sizes[idx];
@@ -110,7 +122,7 @@ export function removePane(tree: LayoutNode | null | undefined, id: number): Lay
   const t = clone(tree);
   const path = findPath(t, id);
   if (!path) return t;
-  const parent = at(t, path.slice(0, -1)) as SplitNode;
+  const parent = splitAt(t, path.slice(0, -1));
   const idx = path[path.length - 1];
   const s = parent.sizes[idx];
   parent.children.splice(idx, 1);
@@ -194,7 +206,7 @@ export function computeRects(tree: LayoutNode | null | undefined, rect: Rect, ga
 const overlap = (a0: number, a1: number, b0: number, b1: number): number => Math.min(a1, b1) - Math.max(a0, b0);
 
 interface NeighbourCandidate {
-  k: string;
+  k: number;
   r: Rect;
   ov: number;
   dist: number;
@@ -206,8 +218,9 @@ export function neighbour(rects: Record<number, Rect>, id: number, dir: Directio
   if (!cur) return null;
   const horiz = dir === 'L' || dir === 'R';
   const cands: NeighbourCandidate[] = [];
-  for (const [k, r] of Object.entries(rects)) {
-    if (String(k) === String(id)) continue;
+  for (const [key, r] of Object.entries(rects)) {
+    const k = Number(key);
+    if (k === id) continue;
     const ov = horiz ? overlap(cur.y, cur.y + cur.h, r.y, r.y + r.h) : overlap(cur.x, cur.x + cur.w, r.x, r.x + r.w);
     if (ov <= 0) continue;
     let dist: number;
@@ -217,7 +230,7 @@ export function neighbour(rects: Record<number, Rect>, id: number, dir: Directio
     else dist = r.y - (cur.y + cur.h);
     cands.push({ k, r, ov, dist });
   }
-  const pick = (list: NeighbourCandidate[], far: boolean): string | null => {
+  const pick = (list: NeighbourCandidate[], far: boolean): number | null => {
     if (!list.length) return null;
     list.sort((a, b) => (far ? b.dist - a.dist : a.dist - b.dist) || b.ov - a.ov);
     // Prefer a pane containing the current pane's top/left edge (tmux uses
@@ -229,19 +242,16 @@ export function neighbour(rects: Record<number, Rect>, id: number, dir: Directio
   };
   const ahead = cands.filter((c) => c.dist >= -1);
   const found = pick(ahead, false);
-  if (found != null) return castId(found, id);
+  if (found != null) return found;
   if (!wrap) return null;
   const behind = cands.filter((c) => c.dist < -1);
-  const w = pick(behind, true);
-  return w == null ? null : castId(w, id);
+  return pick(behind, true);
 }
 
-const castId = <T extends number | string>(k: string, like: T): T => (typeof like === 'number' ? Number(k) : k) as T;
-
-function splitPixelSize(tree: LayoutNode, path: number[], rect: Rect, gap: number): number {
+function splitPixelSize(tree: LayoutNode, path: readonly number[], rect: Rect, gap: number): number {
   // Size in px available to the children of the split at `path`.
   let r = rect;
-  let node = tree as SplitNode;
+  let node = asSplit(tree);
   for (const idx of path) {
     const horiz = node.dir === 'h';
     const n = node.children.length;
@@ -252,7 +262,7 @@ function splitPixelSize(tree: LayoutNode, path: number[], rect: Rect, gap: numbe
     const size = avail * node.sizes[idx];
     const offset = avail * start + gap * idx;
     r = horiz ? { x: r.x + offset, y: r.y, w: size, h: r.h } : { x: r.x, y: r.y + offset, w: r.w, h: size };
-    node = node.children[idx] as SplitNode;
+    node = asSplit(node.children[idx]);
   }
   const horiz = node.dir === 'h';
   return (horiz ? r.w : r.h) - gap * (node.children.length - 1);
@@ -261,7 +271,7 @@ function splitPixelSize(tree: LayoutNode, path: number[], rect: Rect, gap: numbe
 /** Move the boundary before child `index` of the split at `path` by `deltaPx`. */
 export function moveDivider(tree: LayoutNode, path: number[], index: number, deltaPx: number, rect: Rect, gap = 1, minPx = 24): LayoutNode {
   const t = clone(tree);
-  const node = at(t, path) as SplitNode;
+  const node = splitAt(t, path);
   const avail = splitPixelSize(t, path, rect, gap);
   if (avail <= 0) return t;
   const a = index - 1, b = index;
@@ -321,9 +331,9 @@ export function spread(tree: LayoutNode): LayoutNode {
   return t;
 }
 
-export const LAYOUTS = ['even-horizontal', 'even-vertical', 'main-horizontal', 'main-vertical', 'tiled'];
+export const LAYOUTS: readonly string[] = ['even-horizontal', 'even-vertical', 'main-horizontal', 'main-vertical', 'tiled'];
 
-const even = (dir: SplitDir, ids: number[]): LayoutNode => (ids.length === 1 ? leaf(ids[0]) : {
+const even = (dir: SplitDir, ids: readonly number[]): LayoutNode => (ids.length === 1 ? leaf(ids[0]) : {
   type: 'split', dir, children: ids.map(leaf), sizes: ids.map(() => 1 / ids.length),
 });
 
@@ -331,7 +341,7 @@ const even = (dir: SplitDir, ids: number[]): LayoutNode => (ids.length === 1 ? l
  * Build one of tmux's preset layouts from panes in order.
  * mainSize is the main pane fraction for main-* layouts.
  */
-export function presetLayout(name: string, ids: number[], mainSize = 0.6): LayoutNode | null {
+export function presetLayout(name: string, ids: readonly number[], mainSize = 0.6): LayoutNode | null {
   if (!ids.length) return null;
   if (ids.length === 1) return leaf(ids[0]);
   switch (name) {
@@ -353,7 +363,7 @@ export function presetLayout(name: string, ids: number[], mainSize = 0.6): Layou
     }
     case 'tiled': {
       const n = ids.length;
-      let cols = Math.ceil(Math.sqrt(n));
+      const cols = Math.ceil(Math.sqrt(n));
       const rows = Math.ceil(n / cols);
       const rowNodes: LayoutNode[] = [];
       for (let r = 0; r < rows; r++) rowNodes.push(even('h', ids.slice(r * cols, r * cols + cols)));
