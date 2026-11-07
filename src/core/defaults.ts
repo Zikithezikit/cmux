@@ -1,6 +1,6 @@
 // Built-in option values and key bindings, mirroring tmux 3.4 defaults.
 
-export const DEFAULT_OPTIONS: Record<string, string> = {
+export const DEFAULT_OPTIONS: Readonly<Record<string, string>> = {
   // server / session
   prefix: 'C-b',
   prefix2: 'None',
@@ -85,13 +85,13 @@ export const DEFAULT_OPTIONS: Record<string, string> = {
  * Array options (`name[N]`) and the separator tmux uses to split a value set
  * without an index (null: the whole value is one element).
  */
-export const ARRAY_OPTIONS: Record<string, string | null> = {
+export const ARRAY_OPTIONS: Readonly<Record<string, string | null>> = {
   'command-alias': ',', 'terminal-overrides': ',', 'terminal-features': ',', 'update-environment': ' ',
   'status-format': null, 'user-keys': ',', 'pane-colours': ' ',
 };
 
 /** Hooks this implementation fires (besides after-<command>). */
-export const EVENT_HOOKS = new Set([
+export const EVENT_HOOKS: ReadonlySet<string> = new Set([
   'client-attached', 'client-detached', 'client-session-changed', 'client-focus-in', 'client-focus-out',
   'session-created', 'session-closed', 'session-renamed', 'session-window-changed',
   'window-linked', 'window-unlinked', 'window-renamed', 'window-layout-changed', 'window-pane-changed',
@@ -99,23 +99,26 @@ export const EVENT_HOOKS = new Set([
 ]);
 
 /** Hooks tmux has but that never fire here (no processes, alerts or resizes). */
-export const KNOWN_UNFIRED_HOOKS = new Set([
+export const KNOWN_UNFIRED_HOOKS: ReadonlySet<string> = new Set([
   'alert-activity', 'alert-bell', 'alert-silence', 'client-resized', 'client-active', 'client-light-theme',
   'client-dark-theme', 'command-error', 'pane-died', 'pane-exited', 'pane-set-clipboard', 'session-closed-all',
 ]);
 
 /** Options whose values are on/off flags. */
-export const FLAG_OPTIONS = new Set([
+export const FLAG_OPTIONS: ReadonlySet<string> = new Set([
   'mouse', 'renumber-windows', 'set-titles', 'focus-events', 'status', 'automatic-rename',
   'allow-rename', 'aggressive-resize', 'detach-on-destroy', '@ctmux-launcher-motd',
 ]);
 
-/** Options this implementation renders/acts on; anything else is stored but noted as inert. */
-export const ACTIVE_OPTIONS = new Set(Object.keys(DEFAULT_OPTIONS).filter((k) => ![
+/** Default options that are stored but have no effect here. */
+const INACTIVE_DEFAULTS: readonly string[] = [
   'escape-time', 'history-limit', 'default-terminal', 'focus-events', 'aggressive-resize',
   'detach-on-destroy', 'window-status-activity-style', 'window-status-bell-style',
   'pane-border-lines', 'window-style', 'window-active-style',
-].includes(k)));
+];
+
+/** Options this implementation renders/acts on; anything else is stored but noted as inert. */
+export const ACTIVE_OPTIONS: ReadonlySet<string> = new Set(Object.keys(DEFAULT_OPTIONS).filter((k) => !INACTIVE_DEFAULTS.includes(k)));
 
 /**
  * tmux's default key bindings (key-bindings.c), expressed as configuration so
