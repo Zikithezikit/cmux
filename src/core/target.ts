@@ -25,9 +25,9 @@ export interface TargetServer {
 
 function findSession(server: TargetServer, spec: string | undefined, current: Session | null): Session | null {
   if (!spec) return current;
-  if (spec[0] === '$') return server.sessionById(Number(spec.slice(1)));
-  if (spec === '!' ) return server.sessionById(server.lastSessionId);
-  const exact = spec[0] === '=' ? spec.slice(1) : null;
+  if (spec.startsWith('$')) return server.sessionById(Number(spec.slice(1)));
+  if (spec === '!') return server.sessionById(server.lastSessionId);
+  const exact = spec.startsWith('=') ? spec.slice(1) : null;
   if (exact != null) return server.sessionByName(exact);
   return server.sessionByName(spec)
     || server.sessions.find((s) => s.name.startsWith(spec))
@@ -39,8 +39,8 @@ function findWindow(server: TargetServer, session: Session | null, spec: string 
   const sorted = server.sortedWindows(session);
   const cur = current && session.windows.includes(current) ? current : server.activeWindow(session);
   if (spec === '' || spec == null) return cur;
-  if (spec[0] === '@') return session.windows.find((w) => w.id === Number(spec.slice(1))) || null;
-  const pos = sorted.indexOf(cur!);
+  if (spec.startsWith('@')) return session.windows.find((w) => w.id === Number(spec.slice(1))) || null;
+  const pos = cur ? sorted.indexOf(cur) : -1;
   const rel = (n: number): Window | null => sorted.length ? sorted[((pos + n) % sorted.length + sorted.length) % sorted.length] : null;
   switch (spec) {
     case '!': case '{last}': return session.windows.find((w) => w.id === session.last) || null;
@@ -51,7 +51,7 @@ function findWindow(server: TargetServer, session: Session | null, spec: string 
   }
   let m: RegExpExecArray | null;
   if ((m = /^([+-])(\d+)$/.exec(spec))) return rel((m[1] === '+' ? 1 : -1) * Number(m[2]));
-  const exact = spec[0] === '=';
+  const exact = spec.startsWith('=');
   const s = exact ? spec.slice(1) : spec;
   if (/^\d+$/.test(s)) {
     const byIndex = session.windows.find((w) => w.index === Number(s));
@@ -62,18 +62,35 @@ function findWindow(server: TargetServer, session: Session | null, spec: string 
   return session.windows.find((w) => server.windowName(w).startsWith(s)) || null;
 }
 
+const PANE_DIRECTIONS: ReadonlyMap<string, Direction> = new Map([
+  ['{left-of}', 'L'], ['{right-of}', 'R'], ['{up-of}', 'U'], ['{down-of}', 'D'],
+]);
+
+type Edge = 'top' | 'bottom' | 'left' | 'right' | 'tl' | 'tr' | 'bl' | 'br';
+
+const PANE_EDGES: ReadonlyMap<string, Edge> = new Map([
+  ['{top}', 'top'], ['{bottom}', 'bottom'], ['{left}', 'left'], ['{right}', 'right'],
+  ['{top-left}', 'tl'], ['{top-right}', 'tr'], ['{bottom-left}', 'bl'], ['{bottom-right}', 'br'],
+]);
+
+/** How far a pane is from each edge (lower is closer). */
+const edgeScore = (r: Rect): Record<Edge, number> => ({
+  top: r.y, bottom: -(r.y + r.h), left: r.x, right: -(r.x + r.w),
+  tl: r.x + r.y, tr: -(r.x + r.w) + r.y, bl: r.x - (r.y + r.h), br: -(r.x + r.w) - (r.y + r.h),
+});
+
 function findPane(server: TargetServer, window: Window | null, spec: string | undefined, geometry: Geometry | null): number | null {
   if (!window) return null;
   const ids: number[] = panesInOrder(window.layout);
   if (spec === '' || spec == null) return window.active;
-  if (spec[0] === '%') {
+  if (spec.startsWith('%')) {
     const id = Number(spec.slice(1));
     return ids.includes(id) ? id : null;
   }
   const pos = ids.indexOf(window.active);
-  const rel = (n: number): number => ids[((pos + n) % ids.length + ids.length) % ids.length];
+  const rel = (n: number): number | null => ids[((pos + n) % ids.length + ids.length) % ids.length] ?? null;
   switch (spec) {
-    case '!': case '{last}': return ids.includes(window.last!) ? window.last : null;
+    case '!': case '{last}': return window.last != null && ids.includes(window.last) ? window.last : null;
     case '+': case '{next}': return rel(1);
     case '-': case '{previous}': return rel(-1);
   }
@@ -83,20 +100,16 @@ function findPane(server: TargetServer, window: Window | null, spec: string | un
     const base = Number(server.getOption('pane-base-index') || 0);
     return ids[Number(spec) - base] ?? null;
   }
-  const dirs: Record<string, Direction> = { '{left-of}': 'L', '{right-of}': 'R', '{up-of}': 'U', '{down-of}': 'D' };
-  if (dirs[spec] && geometry) {
+  const dir = PANE_DIRECTIONS.get(spec);
+  if (dir && geometry) {
     const { panes }: LayoutRects = computeRects(window.layout, geometry.rect, geometry.gap);
-    return neighbour(panes, window.active, dirs[spec], false);
+    return neighbour(panes, window.active, dir, false);
   }
-  const edges: Record<string, string> = { '{top}': 'top', '{bottom}': 'bottom', '{left}': 'left', '{right}': 'right',
-    '{top-left}': 'tl', '{top-right}': 'tr', '{bottom-left}': 'bl', '{bottom-right}': 'br' };
-  if (edges[spec]) {
+  const edge = PANE_EDGES.get(spec);
+  if (edge) {
     const { panes }: LayoutRects = computeRects(window.layout, { x: 0, y: 0, w: 1000, h: 1000 }, 0);
-    const score = (r: Rect): number => (({
-      top: r.y, bottom: -(r.y + r.h), left: r.x, right: -(r.x + r.w),
-      tl: r.x + r.y, tr: -(r.x + r.w) + r.y, bl: r.x - (r.y + r.h), br: -(r.x + r.w) - (r.y + r.h),
-    }) as Record<string, number>)[edges[spec]];
-    return ids.slice().sort((a, b) => score(panes[a]) - score(panes[b]))[0];
+    const score = (r: Rect): number => edgeScore(r)[edge];
+    return ids.slice().sort((a, b) => score(panes[a]) - score(panes[b]))[0] ?? null;
   }
   return null;
 }
@@ -112,14 +125,17 @@ export function resolveTarget(
   ctx: CommandContext = {},
   geometry: Geometry | null = null,
 ): Target | null {
-  const curSession = (ctx.session as Session | null | undefined) || server.session;
-  const curWindow = (ctx.window as Window | null | undefined) || (curSession && server.activeWindow(curSession));
+  const curSession = ctx.session || server.session;
+  const curWindow = ctx.window || (curSession && server.activeWindow(curSession));
   const done = (session: Session | null, window?: Window | null, pane?: number | null): Target | null => {
     if (!session) return null;
-    window = window || server.activeWindow(session);
-    if (!window && kind !== 'session') return null;
-    if (pane == null && window) pane = window.active;
-    return { session, window, pane } as Target;
+    const win = window || server.activeWindow(session);
+    if (win) return { session, window: win, pane: pane ?? win.active };
+    if (kind !== 'session') return null;
+    // A session target may name a session that has no windows. `Target` cannot say
+    // that yet (window/pane are non-nullable there), so this is the one place the
+    // result is wider than its type; session-kind callers check `r.window` first.
+    return { session, window: null, pane } as unknown as Target;
   };
 
   if (spec == null || spec === '') return done(curSession, curWindow, ctx.pane ?? null);
@@ -133,12 +149,12 @@ export function resolveTarget(
     return loc ? { session: loc.session, window: loc.window, pane: id } : null;
   }
 
-  if (spec[0] === '%' && /^%\d+$/.test(spec)) {
+  if (/^%\d+$/.test(spec)) {
     const id = Number(spec.slice(1));
     const loc = server.locate(id);
     return loc ? { session: loc.session, window: loc.window, pane: id } : null;
   }
-  if (spec[0] === '@' && /^@\d+$/.test(spec)) {
+  if (/^@\d+$/.test(spec)) {
     const loc = server.windowById(Number(spec.slice(1)));
     return loc ? done(loc.session, loc.window) : null;
   }
@@ -151,7 +167,7 @@ export function resolveTarget(
     const dot = rest.lastIndexOf('.');
     if (dot !== -1 && !/^\{.*\}$/.test(rest)) { wPart = rest.slice(0, dot); pPart = rest.slice(dot + 1); }
     else wPart = rest;
-  } else if (spec[0] === '.') {
+  } else if (spec.startsWith('.')) {
     pPart = spec.slice(1);
   } else if (/^[^.]+\.[^.]*$/.test(spec) && kind === 'pane') {
     const dot = spec.indexOf('.');
