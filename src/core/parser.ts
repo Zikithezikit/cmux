@@ -1,4 +1,3 @@
-// @ts-nocheck
 // tmux configuration / command-line parser.
 //
 // Implements the parts of tmux's cmd-parse.y grammar that real-world configs
@@ -6,10 +5,45 @@
 // separators, `{ ... }` command blocks, comments, NAME=value assignments with
 // $NAME / ${NAME} expansion and %if/%elif/%else/%endif/%hidden directives.
 
-const VAR_RE = /^[A-Za-z_][A-Za-z0-9_]*/;
-const DQ_ESCAPES = { n: '\n', t: '\t', r: '\r', e: '\x1b', '"': '"', '\\': '\\', $: '$' };
+import type { Flags } from './types.js';
 
-function expandVar(text, i, env) {
+/** Variables set by NAME=value assignments, used for $NAME expansion. */
+export type Env = Record<string, string>;
+
+/** A parsed argument: a plain word or a `{ ... }` block. */
+export type Arg = string | BlockArg;
+
+/** One tokenised command. `assign` is set (and `args` empty) for NAME=value lines. */
+export interface ParsedCommand {
+  args: Arg[];
+  line: number;
+  assign?: string;
+}
+
+export interface ParseError {
+  line: number;
+  message: string;
+}
+
+export interface TokenizeResult {
+  commands: ParsedCommand[];
+  errors: ParseError[];
+  env: Env;
+}
+
+/** A list of commands, each an array of string arguments. */
+export type CommandList = string[][];
+
+export interface ParsedArgs {
+  flags: Flags;
+  args: Arg[];
+  errors: string[];
+}
+
+const VAR_RE = /^[A-Za-z_][A-Za-z0-9_]*/;
+const DQ_ESCAPES: Record<string, string> = { n: '\n', t: '\t', r: '\r', e: '\x1b', '"': '"', '\\': '\\', $: '$' };
+
+function expandVar(text: string, i: number, env: Env): [string, number] | null {
   // text[i] === '$'. Returns [value, nextIndex] or null when not a variable.
   if (text[i + 1] === '{') {
     const end = text.indexOf('}', i + 2);
@@ -23,7 +57,7 @@ function expandVar(text, i, env) {
   return [lookup(m[0], env, '$' + m[0]), i + 1 + m[0].length];
 }
 
-function lookup(name, env, literal) {
+function lookup(name: string, env: Env, literal: string): string {
   if (Object.prototype.hasOwnProperty.call(env, name)) return env[name];
   // Unknown variables (e.g. $HOME, shell-isms) are kept literally: nothing in
   // the browser can resolve them and keeping them makes debugging easier.
@@ -35,11 +69,11 @@ function lookup(name, env, literal) {
  * Returns { commands: [{ args, line }], errors: [{ line, message }], env }.
  * Assignments are applied to `env` as they are encountered.
  */
-export function tokenize(text, env = {}) {
-  const commands = [];
-  const errors = [];
-  let args = [];
-  let word = null;
+export function tokenize(text: string, env: Env = {}): TokenizeResult {
+  const commands: ParsedCommand[] = [];
+  const errors: ParseError[] = [];
+  let args: Arg[] = [];
+  let word = null as string | null;
   let line = 1;
   let cmdLine = 1;
   let i = 0;
@@ -63,10 +97,10 @@ export function tokenize(text, env = {}) {
       const eq = first.indexOf('=');
       env[first.slice(0, eq)] = first.slice(eq + 1);
       commands.push({ args: [], assign: first.slice(0, eq), line: cmdLine });
-    } else if (first === '%hidden' && args.length === 2 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(args[1])) {
-      const eq = args[1].indexOf('=');
-      env[args[1].slice(0, eq)] = args[1].slice(eq + 1);
-      commands.push({ args: [], assign: args[1].slice(0, eq), line: cmdLine });
+    } else if (first === '%hidden' && args.length === 2 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(args[1] as string)) {
+      const eq = (args[1] as string).indexOf('=');
+      env[(args[1] as string).slice(0, eq)] = (args[1] as string).slice(eq + 1);
+      commands.push({ args: [], assign: (args[1] as string).slice(0, eq), line: cmdLine });
     } else {
       commands.push({ args, line: cmdLine });
     }
@@ -142,7 +176,7 @@ export function tokenize(text, env = {}) {
       // Command block: capture raw text up to the matching brace.
       let depth = 1;
       let j = i + 1;
-      let q = null;
+      let q: string | null = null;
       const startLine = line;
       while (j < n && depth > 0) {
         const ch = text[j];
@@ -178,30 +212,31 @@ export function tokenize(text, env = {}) {
 
 /** A `{ ... }` argument: the raw command text inside the braces. */
 export class BlockArg {
-  constructor(text) { this.text = text; }
-  toString() { return this.text; }
+  declare text: string;
+  constructor(text: string) { this.text = text; }
+  toString(): string { return this.text; }
 }
 
 /**
  * Turn a binding/if-shell argument (string, BlockArg or arg array) into a
  * list of commands, each an array of string arguments.
  */
-export function toCommandList(value, env = {}) {
+export function toCommandList(value: unknown, env: Env = {}): CommandList {
   if (value instanceof BlockArg || typeof value === 'string') {
     const { commands } = tokenize(String(value), { ...env });
     return commands.filter((c) => c.args.length).flatMap((c) => splitOnSemicolons(c.args));
   }
   if (Array.isArray(value)) {
     if (value.length === 1 && value[0] instanceof BlockArg) return toCommandList(value[0], env);
-    return splitOnSemicolons(value);
+    return splitOnSemicolons(value as Arg[]);
   }
   return [];
 }
 
 // Literal ";" arguments (written `\;`) separate commands in a command list.
-function splitOnSemicolons(args) {
-  const out = [];
-  let cur = [];
+function splitOnSemicolons(args: readonly unknown[]): CommandList {
+  const out: CommandList = [];
+  let cur: string[] = [];
   for (const a of args) {
     if (a === ';') { if (cur.length) out.push(cur); cur = []; }
     else cur.push(argToString(a));
@@ -210,7 +245,7 @@ function splitOnSemicolons(args) {
   return out;
 }
 
-export function argToString(a) {
+export function argToString(a: unknown): string {
   return a instanceof BlockArg ? `{ ${a.text} }` : String(a);
 }
 
@@ -219,17 +254,17 @@ export function argToString(a) {
  * trailing ':' means the flag takes a value. Parsing stops at the first
  * non-flag argument or at "--".
  */
-export function parseArgs(args, spec = '') {
-  const takesValue = new Set();
-  const known = new Set();
+export function parseArgs(args: readonly Arg[], spec = ''): ParsedArgs {
+  const takesValue = new Set<string>();
+  const known = new Set<string>();
   for (let i = 0; i < spec.length; i++) {
     const ch = spec[i];
     if (ch === ':') continue;
     known.add(ch);
     if (spec[i + 1] === ':') takesValue.add(ch);
   }
-  const flags = {};
-  const errors = [];
+  const flags: Flags = {};
+  const errors: string[] = [];
   let i = 0;
   for (; i < args.length; i++) {
     const a = args[i];
@@ -253,7 +288,7 @@ export function parseArgs(args, spec = '') {
 }
 
 /** Quote an argument the way `tmux list-keys` prints it. */
-export function quoteArg(s) {
+export function quoteArg(s: string | number | boolean | null | undefined): string {
   s = String(s);
   if (s === '') return "''";
   if (/^[\w@%:.,/=+^~!?<>[\]-]+$/.test(s) && !/^[#~]/.test(s)) return s;
@@ -261,10 +296,10 @@ export function quoteArg(s) {
   return `"${s.replace(/(["\\$])/g, '\\$1')}"`;
 }
 
-export function formatCommand(args) {
+export function formatCommand(args: readonly string[]): string {
   return args.map(quoteArg).join(' ');
 }
 
-export function formatCommandList(list) {
+export function formatCommandList(list: readonly (readonly string[])[]): string {
   return list.map(formatCommand).join(' \\; ');
 }
