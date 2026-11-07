@@ -1,14 +1,13 @@
-// @ts-nocheck
 /*
  * Key handling shared by the workspace page (ES module side-effect import) and
  * the pane content script (classic script). Exposes globalThis.CtmuxKeys.
  *
  * Keys use tmux notation: "C-s", "M-x", "S-Up", "%", "Space", "PPage", ...
  */
-(function (root) {
+(function (root: typeof globalThis) {
   'use strict';
 
-  const NAMED = {
+  const NAMED: Record<string, string> = {
     Enter: 'Enter', Escape: 'Escape', Tab: 'Tab', Backspace: 'BSpace',
     ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
     Home: 'Home', End: 'End', PageUp: 'PPage', PageDown: 'NPage',
@@ -16,7 +15,7 @@
   };
   for (let i = 1; i <= 12; i++) NAMED['F' + i] = 'F' + i;
 
-  const ALIASES = {
+  const ALIASES: Record<string, string> = {
     enter: 'Enter', escape: 'Escape', esc: 'Escape', space: 'Space', tab: 'Tab',
     btab: 'BTab', bspace: 'BSpace', backspace: 'BSpace', up: 'Up', down: 'Down',
     left: 'Left', right: 'Right', home: 'Home', end: 'End', ic: 'IC', insert: 'IC',
@@ -30,7 +29,7 @@
   ]);
 
   /** Canonicalise a tmux key string. Returns null for empty / "None". */
-  function normalizeKey(str) {
+  function normalizeKey(str: unknown): string | null {
     let s = String(str == null ? '' : str).trim();
     if (!s) return null;
     let ctrl = false, meta = false, shift = false;
@@ -44,7 +43,7 @@
       if (s.length === 2 && s[0] === '^') { ctrl = true; s = s.slice(1); continue; }
       break;
     }
-    let base;
+    let base: string;
     if (s.length === 1) {
       base = s;
       if (/[a-z]/i.test(base)) {
@@ -64,10 +63,10 @@
   }
 
   /** Convert a KeyboardEvent into a canonical tmux key, or null. */
-  function eventToKey(e) {
+  function eventToKey(e: CtmuxKeyEvent): string | null {
     const k = e.key;
     if (!k || MODIFIER_ONLY.has(k) || e.isComposing) return null;
-    let base, shift = e.shiftKey;
+    let base: string, shift = e.shiftKey;
     if (k.length === 1) {
       base = k;
       if (e.altKey && /^Key[A-Z]$/.test(e.code || '')) {
@@ -92,15 +91,15 @@
    * feed() returns null when the key should pass through to the page, otherwise
    * { table, key, prefix? } describing what the workspace should execute.
    */
-  function createRouter(getConfig, now) {
+  function createRouter(getConfig: () => CtmuxRouterConfig | null | undefined, now?: () => number): CtmuxKeyRouter {
     now = now || Date.now;
     let table = 'root';
     let repeatUntil = 0;
 
-    function feed(input) {
+    function feed(input: string | CtmuxKeyEvent): CtmuxRoute | null {
       const key = typeof input === 'string' ? normalizeKey(input) : eventToKey(input);
       if (!key) return null;
-      const cfg = getConfig() || {};
+      const cfg: CtmuxRouterConfig = getConfig() || {};
       const tables = cfg.tables || {};
       const repeat = cfg.repeat || {};
 
@@ -116,16 +115,16 @@
 
       const t = table;
       if (repeatUntil) {
-        if (now() <= repeatUntil && repeat[t] && repeat[t].indexOf(key) !== -1) {
-          repeatUntil = now() + (cfg.repeatTime || 0);
+        if (now!() <= repeatUntil && repeat[t] && repeat[t].indexOf(key) !== -1) {
+          repeatUntil = now!() + (cfg.repeatTime || 0);
           return { table: t, key };
         }
         table = 'root';
         repeatUntil = 0;
         return feed(key);
       }
-      if (repeat[t] && repeat[t].indexOf(key) !== -1 && cfg.repeatTime > 0) {
-        repeatUntil = now() + cfg.repeatTime;
+      if (repeat[t] && repeat[t].indexOf(key) !== -1 && cfg.repeatTime! > 0) {
+        repeatUntil = now!() + cfg.repeatTime!;
       } else {
         table = 'root';
       }
@@ -135,10 +134,46 @@
     return {
       feed,
       get table() { return table; },
-      setTable(name) { table = name || 'root'; repeatUntil = 0; },
+      setTable(name?: string | null) { table = name || 'root'; repeatUntil = 0; },
       reset() { table = 'root'; repeatUntil = 0; },
     };
   }
 
   root.CtmuxKeys = { normalizeKey, eventToKey, createRouter };
 })(typeof globalThis !== 'undefined' ? globalThis : self);
+
+/** Tables the key router consults (a subset of the workspace runtime config). */
+interface CtmuxRouterConfig {
+  prefix?: string | null;
+  prefix2?: string | null;
+  /** Bound keys per table name. */
+  tables?: Record<string, string[]>;
+  /** Repeatable keys per table name. */
+  repeat?: Record<string, string[]>;
+  repeatTime?: number;
+}
+
+/** What the workspace should execute for a routed key. */
+interface CtmuxRoute {
+  table: string;
+  key: string;
+  prefix?: boolean;
+}
+
+/** The parts of a KeyboardEvent that eventToKey() reads. */
+type CtmuxKeyEvent = Pick<KeyboardEvent, 'key' | 'code' | 'shiftKey' | 'altKey' | 'ctrlKey' | 'isComposing'>;
+
+interface CtmuxKeyRouter {
+  feed(input: string | CtmuxKeyEvent): CtmuxRoute | null;
+  readonly table: string;
+  setTable(name?: string | null): void;
+  reset(): void;
+}
+
+interface CtmuxKeysApi {
+  normalizeKey(str: unknown): string | null;
+  eventToKey(e: CtmuxKeyEvent): string | null;
+  createRouter(getConfig: () => CtmuxRouterConfig | null | undefined, now?: () => number): CtmuxKeyRouter;
+}
+
+declare var CtmuxKeys: CtmuxKeysApi;

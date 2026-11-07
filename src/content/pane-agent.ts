@@ -1,4 +1,3 @@
-// @ts-nocheck
 /*
  * Pane agent: runs in every frame, but only does anything inside frames whose
  * top-level document is the chrome-tmux workspace page.
@@ -24,13 +23,48 @@
     return m ? Number(m[1]) : null;
   };
 
-  let cfg = { prefix: 'C-b', tables: {}, repeat: {}, copy: {}, repeatTime: 500 };
-  chrome.storage.local.get('ctmux:runtime').then((r) => { if (r['ctmux:runtime']) cfg = r['ctmux:runtime']; }).catch(() => {});
+  interface CopyBinding {
+    /** A `send -X` command run inside the page. */
+    local?: string[];
+    remote?: boolean;
+  }
+
+  /** The workspace's runtime config (stored under 'ctmux:runtime'). */
+  interface RuntimeConfig extends CtmuxRouterConfig {
+    copy?: Record<string, Record<string, CopyBinding>>;
+    modeKeys?: string;
+    modeColours?: { fg?: string; bg?: string };
+    mouse?: boolean;
+    yank?: { mouse: boolean } | null;
+  }
+
+  /** A command the workspace sends to this pane. */
+  interface PaneCommand {
+    ctmux: true;
+    type: string;
+    table?: string;
+    scrollUp?: boolean;
+    args: string[];
+    action?: string;
+    text: string;
+    keys?: string[];
+    literal?: boolean;
+    all?: boolean;
+    limit?: number;
+  }
+
+  /** Non-standard window.find() (Chrome supports it; lib.dom does not declare it). */
+  interface FindWindow extends Window {
+    find?(text: string, caseSensitive: boolean, backwards: boolean, wrap: boolean, wholeWord: boolean, searchInFrames: boolean, showDialog: boolean): boolean;
+  }
+
+  let cfg: RuntimeConfig = { prefix: 'C-b', tables: {}, repeat: {}, copy: {}, repeatTime: 500 };
+  chrome.storage.local.get('ctmux:runtime').then((r) => { if (r['ctmux:runtime']) cfg = r['ctmux:runtime'] as RuntimeConfig; }).catch(() => {});
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes['ctmux:runtime']) cfg = changes['ctmux:runtime'].newValue || cfg;
+    if (area === 'local' && changes['ctmux:runtime']) cfg = (changes['ctmux:runtime'].newValue as RuntimeConfig | undefined) || cfg;
   });
 
-  const send = (msg) => {
+  const send = (msg: Record<string, unknown>) => {
     try {
       chrome.runtime.sendMessage({ ...msg, pane: paneId(), root: isRoot }).catch(() => {});
     } catch { /* extension reloaded: context invalidated */ }
@@ -40,7 +74,7 @@
 
   // ------------------------------------------------------------------ keys
 
-  function swallow(e) {
+  function swallow(e: Event) {
     e.preventDefault();
     e.stopImmediatePropagation();
   }
@@ -74,7 +108,7 @@
   // --------------------------------------------------------- reports/focus
 
   let last = { url: '', title: '' };
-  function report(kind) {
+  function report(kind?: string) {
     if (!isRoot) return;
     const url = location.href;
     const title = document.title || '';
@@ -100,13 +134,13 @@
   window.addEventListener('focus', focused, true);
   window.addEventListener('mousedown', focused, true);
 
-  let lastEditable = null;
-  const isEditable = (el) => el && (el.isContentEditable || /^(INPUT|TEXTAREA)$/.test(el.tagName));
-  document.addEventListener('focusin', (e) => { if (isEditable(e.target)) lastEditable = e.target; }, true);
+  let lastEditable: HTMLElement | null = null;
+  const isEditable = (el: HTMLElement | null) => el && (el.isContentEditable || /^(INPUT|TEXTAREA)$/.test(el.tagName));
+  document.addEventListener('focusin', (e) => { if (isEditable(e.target as HTMLElement)) lastEditable = e.target as HTMLElement; }, true);
 
   // ------------------------------------------------------------- clipboard
 
-  async function writeClipboard(text) {
+  async function writeClipboard(text: string) {
     try {
       await navigator.clipboard.writeText(text);
       return true;
@@ -116,7 +150,7 @@
         ta.value = text;
         ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
         (document.body || document.documentElement).appendChild(ta);
-        const sel = window.getSelection();
+        const sel = window.getSelection()!;
         const saved = sel.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
         ta.select();
         const ok = document.execCommand('copy');
@@ -129,14 +163,14 @@
     }
   }
 
-  async function yank(text) {
+  async function yank(text: string) {
     if (!text) return;
     const copied = await writeClipboard(text);
     send({ ctmux: 'yank', text, copied });
   }
 
-  function insertText(text) {
-    let el = document.activeElement;
+  function insertText(text: string) {
+    let el = document.activeElement as HTMLElement | null;
     if (!isEditable(el) && lastEditable && document.contains(lastEditable)) { el = lastEditable; el.focus(); }
     if (!isEditable(el)) return false;
     return document.execCommand('insertText', false, text);
@@ -149,11 +183,11 @@
     table: 'copy-mode-vi',
     selecting: false,
     searching: false,
-    lastSearch: null,
+    lastSearch: null as string | null,
     lastDir: 'forward',
-    host: null,
-    cursor: null,
-    badge: null,
+    host: null as HTMLElement | null,
+    cursor: null as HTMLElement | null,
+    badge: null as HTMLElement | null,
 
     ui() {
       if (this.host) return;
@@ -167,23 +201,23 @@
         .c{position:fixed;background:${bg};opacity:.75;mix-blend-mode:normal;animation:b 1s steps(1) infinite}
         .b{position:fixed;top:0;right:0;font:12px/18px monospace;padding:0 6px;background:${bg};color:${fg}}
         @keyframes b{50%{opacity:.25}}</style><div class="c"></div><div class="b"></div>`;
-      this.cursor = root.querySelector('.c');
-      this.badge = root.querySelector('.b');
+      this.cursor = root.querySelector<HTMLElement>('.c');
+      this.badge = root.querySelector<HTMLElement>('.b');
     },
 
-    setBadge(extra) {
+    setBadge(extra?: string) {
       if (!this.badge) return;
       const total = Math.max(0, Math.round((scroller().scrollHeight - innerHeight) / lineHeight()));
       const pos = Math.max(0, Math.round((total * lineHeight() - scroller().scrollTop) / lineHeight()));
       this.badge.textContent = `${extra ? extra + ' ' : ''}${this.selecting ? '(sel) ' : ''}[${pos}/${total}]`;
     },
 
-    enter(table, scrollUp) {
+    enter(table?: string, scrollUp?: boolean) {
       this.table = table || 'copy-mode-vi';
       this.ui();
-      if (!this.host.isConnected) document.documentElement.appendChild(this.host);
+      if (!this.host!.isConnected) document.documentElement.appendChild(this.host!);
       this.active = true;
-      const sel = window.getSelection();
+      const sel = window.getSelection()!;
       if (sel.rangeCount && !sel.isCollapsed && inView(focusRect())) {
         this.selecting = true;
       } else {
@@ -200,35 +234,35 @@
       this.active = false;
       this.selecting = false;
       this.searching = false;
-      const sel = window.getSelection();
+      const sel = window.getSelection()!;
       if (sel.rangeCount && !sel.isCollapsed) sel.collapse(sel.focusNode, sel.focusOffset);
       if (this.host) this.host.remove();
       send({ ctmux: 'mode', mode: null });
     },
 
-    draw(extra) {
+    draw(extra?: string) {
       if (!this.active) return;
       const r = focusRect();
       if (r) {
-        Object.assign(this.cursor.style, {
+        Object.assign(this.cursor!.style, {
           left: `${r.left}px`, top: `${r.top}px`, width: `${Math.max(2, r.width || 8)}px`, height: `${r.height || lineHeight()}px`, display: 'block',
         });
       } else {
-        this.cursor.style.display = 'none';
+        this.cursor!.style.display = 'none';
       }
       this.setBadge(extra);
     },
 
-    move(dir, gran) {
-      const sel = window.getSelection();
+    move(dir: string, gran: string) {
+      const sel = window.getSelection()!;
       if (!sel.rangeCount) placeCaretAt(16, 8, false) || placeCaretAtStart();
       sel.modify(this.selecting ? 'extend' : 'move', dir, gran);
       ensureVisible();
     },
 
-    async exec(args) {
+    async exec(args: string[]) {
       const [cmd, ...rest] = args;
-      const sel = window.getSelection();
+      const sel = window.getSelection()!;
       const s = scroller();
       const lh = lineHeight();
       switch (cmd) {
@@ -279,7 +313,7 @@
           this.move('forward', 'word');
           break;
         case 'other-end':
-          if (sel.rangeCount) sel.setBaseAndExtent(sel.focusNode, sel.focusOffset, sel.anchorNode, sel.anchorOffset);
+          if (sel.rangeCount) sel.setBaseAndExtent(sel.focusNode!, sel.focusOffset, sel.anchorNode!, sel.anchorOffset);
           ensureVisible();
           break;
         case 'rectangle-toggle':
@@ -332,23 +366,23 @@
       this.draw();
     },
 
-    search(term, dir, reverse) {
+    search(term: string | null | undefined, dir: string, reverse?: boolean) {
       if (!term) { this.draw('(no search)'); return; }
       this.lastSearch = term;
       if (!reverse) this.lastDir = dir;
-      const sel = window.getSelection();
-      const anchor = this.selecting && sel.rangeCount ? [sel.anchorNode, sel.anchorOffset] : null;
+      const sel = window.getSelection()!;
+      const anchor: [Node | null, number] | null = this.selecting && sel.rangeCount ? [sel.anchorNode, sel.anchorOffset] : null;
       if (dir === 'forward' && sel.rangeCount) {
         sel.collapse(sel.focusNode, sel.focusOffset);
         sel.modify('move', 'forward', 'character');
       } else if (sel.rangeCount) {
         sel.collapse(sel.focusNode, sel.focusOffset);
       }
-      const found = window.find(term, false, dir === 'backward', true, false, false, false);
+      const found = (window as FindWindow).find!(term, false, dir === 'backward', true, false, false, false);
       if (!found) { this.draw(`(not found: ${term})`); return; }
       const start = sel.getRangeAt(0);
       const node = start.startContainer, off = start.startOffset;
-      if (anchor) sel.setBaseAndExtent(anchor[0], anchor[1], node, off);
+      if (anchor) sel.setBaseAndExtent(anchor[0]!, anchor[1], node, off);
       else sel.collapse(node, off);
       ensureVisible();
       this.draw();
@@ -374,7 +408,7 @@
   }
 
   function focusRect() {
-    const sel = window.getSelection();
+    const sel = window.getSelection()!;
     if (!sel.rangeCount || !sel.focusNode) return null;
     const r = document.createRange();
     try {
@@ -383,7 +417,7 @@
     } catch { return null; }
     let rect = r.getClientRects()[0] || r.getBoundingClientRect();
     if ((!rect || (!rect.width && !rect.height && !rect.top && !rect.left)) && sel.focusNode.nodeType === 1) {
-      const child = sel.focusNode.childNodes[sel.focusOffset] || sel.focusNode;
+      const child = sel.focusNode.childNodes[sel.focusOffset] as Element || sel.focusNode as Element;
       if (child.getBoundingClientRect) rect = child.getBoundingClientRect();
     }
     if (!rect) return null;
@@ -391,7 +425,7 @@
     return { left: rect.left, top: rect.top, width: rect.width || 8, height: rect.height || lineHeight() };
   }
 
-  const inView = (r) => r && r.top >= 0 && r.top + r.height <= innerHeight && r.left >= 0 && r.left <= innerWidth;
+  const inView = (r: ReturnType<typeof focusRect>) => r && r.top >= 0 && r.top + r.height <= innerHeight && r.left >= 0 && r.left <= innerWidth;
 
   function ensureVisible() {
     const r = focusRect();
@@ -402,7 +436,7 @@
     else if (r.top + r.height > innerHeight - margin) s.scrollTop += r.top + r.height - innerHeight + margin;
   }
 
-  function caretRangeAt(x, y) {
+  function caretRangeAt(x: number, y: number) {
     if (document.caretRangeFromPoint) return document.caretRangeFromPoint(x, y);
     const p = document.caretPositionFromPoint && document.caretPositionFromPoint(x, y);
     if (!p) return null;
@@ -412,12 +446,12 @@
   }
 
   /** Put the caret at the first text found scanning down from (x, y). */
-  function placeCaretAt(x, y, extend) {
-    const sel = window.getSelection();
+  function placeCaretAt(x: number, y: number, extend: boolean) {
+    const sel = window.getSelection()!;
     for (let yy = Math.max(1, y); yy < innerHeight; yy += 8) {
       for (const xx of [x, x + 40, innerWidth / 4, innerWidth / 2]) {
         const r = caretRangeAt(xx, yy);
-        if (r && r.startContainer.nodeType === 3 && r.startContainer.textContent.trim()) {
+        if (r && r.startContainer.nodeType === 3 && r.startContainer.textContent!.trim()) {
           if (extend && sel.rangeCount) sel.extend(r.startContainer, r.startOffset);
           else sel.collapse(r.startContainer, r.startOffset);
           return true;
@@ -429,14 +463,14 @@
 
   function placeCaretAtStart() {
     const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT, {
-      acceptNode: (n) => (n.textContent.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP),
+      acceptNode: (n) => (n.textContent!.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP),
     });
     const n = walker.nextNode();
-    if (n) window.getSelection().collapse(n, 0);
+    if (n) window.getSelection()!.collapse(n, 0);
     return !!n;
   }
 
-  function scrollKeepingCaret(dy) {
+  function scrollKeepingCaret(dy: number) {
     const before = focusRect();
     scroller().scrollBy(0, dy);
     const after = focusRect();
@@ -452,44 +486,44 @@
 
   // ------------------------------------------------------------ mouse yank
 
-  let downAt = null;
+  let downAt: [number, number] | null = null;
   window.addEventListener('mousedown', (e) => { downAt = e.button === 0 ? [e.clientX, e.clientY] : null; }, true);
   window.addEventListener('mouseup', (e) => {
     if (!cfg.yank || !cfg.yank.mouse || !cfg.mouse || !downAt || e.button !== 0) return;
     const moved = Math.abs(e.clientX - downAt[0]) + Math.abs(e.clientY - downAt[1]) > 4;
     downAt = null;
-    if (!moved || isEditable(document.activeElement)) return;
+    if (!moved || isEditable(document.activeElement as HTMLElement | null)) return;
     setTimeout(() => {
-      const text = window.getSelection().toString();
+      const text = window.getSelection()!.toString();
       if (text) { yank(text); if (copy.active) copy.exit(); }
     }, 0);
   }, true);
 
   // ----------------------------------------------------- workspace commands
 
-  function collectLinks(limit) {
-    const seen = new Set();
-    const out = [];
-    const add = (url, text) => {
+  function collectLinks(limit: number) {
+    const seen = new Set<string>();
+    const out: { url: string; text: string }[] = [];
+    const add = (url: string, text: string) => {
       if (!url || seen.has(url) || out.length >= limit) return;
       if (!/^(https?|ftp|file|mailto):/i.test(url)) return;
       seen.add(url);
       out.push({ url, text: (text || '').replace(/\s+/g, ' ').trim().slice(0, 120) });
     };
-    for (const a of document.querySelectorAll('a[href]')) add(a.href, a.textContent || a.title);
+    for (const a of document.querySelectorAll<HTMLAnchorElement>('a[href]')) add(a.href, a.textContent || a.title);
     const text = document.body ? document.body.innerText : '';
     const re = /\b(?:https?|ftp|file):\/\/[^\s<>"'`)\]}]+|\bwww\.[\w-]+\.[^\s<>"'`)\]}]+/g;
-    let m;
+    let m: RegExpExecArray | null;
     while ((m = re.exec(text)) && out.length < limit) add(m[0].startsWith('www.') ? 'http://' + m[0] : m[0].replace(/[.,;:!?]+$/, ''), '');
     return out;
   }
 
-  function sendKeys(keys, literal) {
+  function sendKeys(keys: string[], literal?: boolean) {
     for (const k of keys) {
       if (literal) { insertText(k); continue; }
       switch (K.normalizeKey(k)) {
         case 'Enter': {
-          const el = document.activeElement;
+          const el = document.activeElement as HTMLInputElement | null;
           if (el && el.form && el.form.requestSubmit) el.form.requestSubmit();
           else insertText('\n');
           break;
@@ -504,7 +538,7 @@
     }
   }
 
-  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((msg: PaneCommand | undefined, sender, sendResponse) => {
     if (!msg || msg.ctmux !== true || sender.id !== chrome.runtime.id) return false;
     switch (msg.type) {
       case 'copy-mode':
