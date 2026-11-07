@@ -1,21 +1,54 @@
-// @ts-nocheck
 // Status line rendering: status-left, window list, status-right, plus the
 // message / prompt modes that temporarily take over the line.
 
 import { toRuns, truncateRuns, parseStyle, applyStyle, styleToCss } from '../core/format.js';
+import type { Session, Window } from '../core/types.js';
+
+/** A resolved style (as produced by format.js parseStyle/applyStyle). */
+export interface RunStyle {
+  fg: string | null;
+  bg: string | null;
+  attrs: Record<string, boolean>;
+}
+
+/** A run of text in one style (format.js toRuns). */
+export interface StyledRun {
+  text: string;
+  style: RunStyle;
+}
+
+/** What the status line needs from the server. */
+export interface StatusServer {
+  readonly session: Session | null;
+  sortedWindows(session: Session): Window[];
+}
+
+/** What the status line needs from the tmux engine. */
+export interface StatusTmux {
+  server: StatusServer;
+  getOption(name: string): string;
+  expand(fmt: string, ctx?: Record<string, unknown>, opts?: { time?: boolean }): string;
+}
+
+/** What temporarily takes over the status line: a message or a prompt. */
+export interface StatusOverlay {
+  message?: string;
+  prompt?: HTMLElement;
+  command?: boolean;
+}
 
 // Powerline private-use glyphs → CSS shapes (no patched font needed).
-const PL = { '': 'r', '': 'l', '': 'rr', '': 'lr', '': 'rt', '': 'lt', '': 'rt', '': 'lt' };
+const PL: Record<string, string> = { '': 'r', '': 'l', '': 'rr', '': 'lr', '': 'rt', '': 'lt', '': 'rt', '': 'lt' };
 const PL_RE = /[-]/;
 
-export function baseStyle(t) {
+export function baseStyle(t: StatusTmux) {
   return parseStyle(t.getOption('status-style'));
 }
 
 /** Append runs to `el` as styled spans. */
-export function renderRuns(el, runs) {
+export function renderRuns(el: HTMLElement, runs: StyledRun[]): void {
   for (const r of runs) {
-    const css = styleToCss(r.style);
+    const css: Partial<CSSStyleDeclaration> = styleToCss(r.style);
     const parts = PL_RE.test(r.text) ? r.text.split(/([-])/) : [r.text];
     for (const part of parts) {
       if (!part) continue;
@@ -37,7 +70,7 @@ export function renderRuns(el, runs) {
   }
 }
 
-function segment(cls, runs) {
+function segment(cls: string, runs: StyledRun[]): HTMLElement {
   const el = document.createElement('div');
   el.className = `seg ${cls}`;
   renderRuns(el, runs);
@@ -48,8 +81,8 @@ function segment(cls, runs) {
  * Render the status line into `el`.
  * `overlay` is null, { message, style } or { prompt: HTMLElement }.
  */
-export function renderStatus(t, el, overlay) {
-  const app = document.getElementById('app');
+export function renderStatus(t: StatusTmux, el: HTMLElement, overlay: StatusOverlay | null): void {
+  const app = document.getElementById('app')!;
   const pos = t.getOption('status-position') === 'top' ? 'top' : 'bottom';
   app.classList.toggle('status-top', pos === 'top');
   app.classList.toggle('status-bottom', pos !== 'top');
@@ -101,7 +134,7 @@ export function renderStatus(t, el, overlay) {
     const runs = toRuns(t.expand(fmt, { session, window: w }, { time: true }), st);
     const span = document.createElement('div');
     span.className = 'win';
-    span.dataset.window = w.id;
+    span.dataset.window = w.id as unknown as string;
     renderRuns(span, runs);
     winEl.appendChild(span);
     if (sep && i < windows.length - 1) renderRuns(winEl, toRuns(sep, base));
