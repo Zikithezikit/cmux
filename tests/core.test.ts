@@ -7,7 +7,16 @@ import * as L from '../src/core/layout.js';
 import { toUrl } from '../src/core/commands.js';
 import type { LayoutNode, LayoutRects, SplitNode } from '../src/core/types.js';
 
-const { normalizeKey, createRouter } = globalThis.CtmuxKeys;
+// Call through the namespace object so the methods keep their receiver.
+const keys = globalThis.CtmuxKeys;
+const normalizeKey = (str: string): string | null => keys.normalizeKey(str);
+const createRouter: typeof keys.createRouter = (getConfig, now) => keys.createRouter(getConfig, now);
+
+/** Narrow a layout node to a split (the assertions below read split fields). */
+function asSplit(node: LayoutNode | null): SplitNode {
+  assert.ok(node?.type === 'split', 'expected a split node');
+  return node;
+}
 
 test('normalizeKey canonicalises tmux key names', () => {
   assert.equal(normalizeKey('C-s'), 'C-s');
@@ -54,8 +63,8 @@ bind y {
   display "split; done"
 }
 `);
-  assert.equal((env as Record<string, string>).pat, 'a(\\S+)b');
-  assert.equal((env as Record<string, string>).is_vim, "ps -t '#{pane_tty}'     | grep \"$x\" a(\\S+)b");
+  assert.equal(env.pat, 'a(\\S+)b');
+  assert.equal(env.is_vim, "ps -t '#{pane_tty}'     | grep \"$x\" a(\\S+)b");
   const cmds = commands.filter((c) => c.args.length);
   assert.deepEqual(cmds[0].args, ['bind', 'x', 'display', 'hi', ';', 'display', 'there']);
   assert.deepEqual(cmds[1].args, ['set', '-g', 'status-left', '#{session_name}']);
@@ -89,14 +98,14 @@ test('formats: variables, conditionals, comparisons, truncation, styles', () => 
   assert.equal(runs[0].style.fg, colourToCss('red'));
   assert.equal(runs[1].text, 'b#');
   assert.equal(runs[1].style.bg, '#000');
-  assert.equal(truncateRuns(runs, 2).map((r: { text: string }) => r.text).join(''), 'ab');
+  assert.equal(truncateRuns(runs, 2).map((r) => r.text).join(''), 'ab');
   assert.equal(colourToCss('colour231'), '#ffffff');
   assert.equal(colourToCss('#ABCDEF'), '#abcdef');
   assert.equal(strftime('%H:%M %d-%b-%y', new Date(2026, 9, 22, 7, 5)), '07:05 22-Oct-26');
 });
 
 test('layout: split, remove, rects, neighbours, resize, presets', () => {
-  let t = L.leaf(1) as LayoutNode;
+  let t: LayoutNode = L.leaf(1);
   t = L.splitPane(t, 1, 2, 'h');
   t = L.splitPane(t, 2, 3, 'v');
   assert.deepEqual(L.panesInOrder(t), [1, 2, 3]);
@@ -115,16 +124,18 @@ test('layout: split, remove, rects, neighbours, resize, presets', () => {
   const r2 = L.resizePane(t, 2, 'L', 100, area, 1);
   assert.ok(L.computeRects(r2, area, 1).panes[2].w > 590, 'last child moves its left border');
 
-  t = L.removePane(t, 2)!;
-  assert.deepEqual(L.panesInOrder(t), [1, 3]);
-  assert.equal((t as SplitNode).dir, 'h');
+  const removed = asSplit(L.removePane(t, 2));
+  assert.deepEqual(L.panesInOrder(removed), [1, 3]);
+  assert.equal(removed.dir, 'h');
   assert.equal(L.removePane(L.leaf(1), 1), null);
 
   const tiled = L.presetLayout('tiled', [1, 2, 3, 4, 5]);
-  assert.equal((tiled as SplitNode).children.length, 2);
+  assert.equal(asSplit(tiled).children.length, 2);
   const mv = L.presetLayout('main-vertical', [1, 2, 3], 0.6);
-  assert.equal((mv as SplitNode).dir, 'h');
-  assert.deepEqual(L.panesInOrder(L.rotate(L.presetLayout('even-horizontal', [1, 2, 3])!)), [3, 1, 2]);
+  assert.equal(asSplit(mv).dir, 'h');
+  const even = L.presetLayout('even-horizontal', [1, 2, 3]);
+  assert.ok(even);
+  assert.deepEqual(L.panesInOrder(L.rotate(even)), [3, 1, 2]);
 });
 
 test('toUrl understands URLs, hosts, paths and search terms', () => {

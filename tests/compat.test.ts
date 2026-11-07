@@ -10,7 +10,7 @@ import { runShell } from '../src/core/shell.js';
 import { resolveCommand } from '../src/core/commands.js';
 import { panesInOrder } from '../src/core/layout.js';
 import type { TpmFetch, TpmTimers } from '../src/tpm/tpm.js';
-import type { Ui } from '../src/core/types.js';
+import type { MenuOptions, PaneCommandMessage, PopupOptions, Ui } from '../src/core/types.js';
 
 /** A stub UI: records messages; any method it doesn't define is a no-op. */
 type StubUi = Ui & { messages: string[] };
@@ -19,13 +19,28 @@ type StubOverrides = { [K in keyof Ui]?: (...args: never[]) => unknown };
 /** The engine with the stub UI. */
 type Engine = Tmux & { ui: StubUi };
 
-interface MenuItem { key?: string; label?: string; separator?: boolean; disabled?: boolean }
-interface MenuOpts { title: string; items: MenuItem[] }
-interface PopupOpts { url?: string; width?: string; title?: string }
+/** A fetch stub: resolves to a minimal Response-like object. */
+type StubFetch = (url: string) => Promise<unknown>;
 
-const timers = { setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout } as unknown as TpmTimers;
+/**
+ * TPM's timer and fetch dependencies, stubbed. The stubs don't match TpmTimers/TpmFetch
+ * exactly (a numeric interval handle, a Response-like object), so the casts live here
+ * and can be dropped in one place if those types are narrowed to what TPM uses.
+ */
+function tpmDeps(fetchImpl: StubFetch): { timers: TpmTimers; fetchImpl: TpmFetch } {
+  return {
+    timers: { setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout } as unknown as TpmTimers,
+    fetchImpl: fetchImpl as unknown as TpmFetch,
+  };
+}
 
-function stubUi(extra: StubOverrides = {}) {
+/** Assert that a value is present and return it (an assertion failure, not a TypeError). */
+function must<T>(value: T | null | undefined): T {
+  assert.ok(value != null, 'expected a value');
+  return value;
+}
+
+function stubUi(extra: StubOverrides = {}): StubUi {
   const messages: string[] = [];
   const ui = {
     messages,
@@ -38,10 +53,10 @@ function stubUi(extra: StubOverrides = {}) {
   return new Proxy(ui, { get: (o, p) => (p in o ? o[p as keyof typeof o] : () => {}) }) as unknown as StubUi;
 }
 
-async function boot(conf: string, { ui = stubUi() }: { ui?: StubUi } = {}) {
+async function boot(conf: string, { ui = stubUi() }: { ui?: StubUi } = {}): Promise<{ t: Engine; ui: StubUi }> {
   const t = new Tmux({ ui }) as Engine;
   t.platform = 'Linux';
-  const tpm = new Tpm(t, { storage: memoryStorage(), timers, fetchImpl: (async () => ({ ok: false })) as unknown as TpmFetch });
+  const tpm = new Tpm(t, { storage: memoryStorage(), ...tpmDeps(async () => ({ ok: false })) });
   await t.loadDefaults();
   t.server.newSession({});
   if (conf) await t.runConfig(conf, { source: 'test.conf' });
@@ -50,7 +65,7 @@ async function boot(conf: string, { ui = stubUi() }: { ui?: StubUi } = {}) {
 }
 
 /** Run tmux commands and capture what they print (like `tmux ...` in a shell). */
-async function capture(t: Engine, cmd: string) {
+async function capture(t: Engine, cmd: string): Promise<string> {
   const r = await t.shell(cmd);
   assert.ok(r, `shell subset should handle: ${cmd}`);
   return r.out;
@@ -106,7 +121,7 @@ if-shell "ps -o comm= -t '#{pane_tty}' | grep -iqE vim" 'set -g @vim yes' 'set -
   assert.equal(t.getOption('@b'), '12');
   assert.equal(t.getOption('@three'), 'yes');
   assert.equal(t.getOption('@vim'), 'no', 'unsupported shell (ps) still falls back to false');
-  assert.ok(t.notices.some((n) => /shell condition treated as false/.test(n.message)));
+  assert.ok(t.notices.some((n) => n.message.includes('shell condition treated as false')));
   assert.deepEqual(errors(t), []);
 });
 
@@ -118,7 +133,7 @@ test('tmux commands print to a calling shell', async () => {
   assert.equal(await capture(t, 'tmux show-environment -g FOO'), 'FOO=bar\n');
   assert.match(await capture(t, 'tmux list-windows -F "#{window_index} #{window_panes}"'), /^0 1\n$/);
   assert.match(await capture(t, 'tmux list-keys -T prefix c'), /new-window/);
-  assert.equal((await t.shell('tmux show -gv @nope'))!.code, 1);
+  assert.equal(must(await t.shell('tmux show -gv @nope')).code, 1);
   assert.equal(await capture(t, 'tmux list-panes -F "#{pane_index}" -f "#{pane_active}"'), '0\n');
 });
 
@@ -164,8 +179,8 @@ set-hook -g session-closed 'set -ga @events "closed "'
 
 test('set-hook rejects unknown hooks and notes ones that never fire', async () => {
   const { t } = await boot('set-hook -g not-a-hook "display hi"\nset-hook -g pane-died "display died"');
-  assert.ok(errors(t).some((n) => /invalid hook: not-a-hook/.test(n.message)));
-  assert.ok(t.notices.some((n) => /pane-died: this event never happens/.test(n.message)));
+  assert.ok(errors(t).some((n) => n.message.includes('invalid hook: not-a-hook')));
+  assert.ok(t.notices.some((n) => n.message.includes('pane-died: this event never happens')));
 });
 
 test('hooks cannot recurse forever', async () => {
@@ -180,7 +195,7 @@ test('marked panes: select-pane -m/-M, ~ target, flags and join-pane', async () 
   const { t } = await boot('');
   const srv = t.server;
   await t.runString('split-window -h');
-  const w0 = srv.window!;
+  const w0 = must(srv.window);
   const [a, b] = panesInOrder(w0.layout);
   await t.runString(`select-pane -m -t %${a}`);
   assert.equal(srv.markedPane(), a);
@@ -194,7 +209,7 @@ test('marked panes: select-pane -m/-M, ~ target, flags and join-pane', async () 
 
   // join-pane with no -s takes the marked pane.
   await t.runString('new-window');
-  const w1 = srv.window!;
+  const w1 = must(srv.window);
   await t.runString('join-pane -h');
   assert.deepEqual(panesInOrder(w1.layout).length, 2);
   assert.ok(panesInOrder(w1.layout).includes(a));
@@ -207,7 +222,7 @@ test('marked panes: select-pane -m/-M, ~ target, flags and join-pane', async () 
   await t.runString('select-pane -M');
   assert.equal(srv.markedPane(), null);
   await assert.doesNotReject(t.runString('join-pane'));
-  assert.ok(t.ui.messages.some((m) => /no marked pane/.test(m)));
+  assert.ok(t.ui.messages.some((m) => m.includes('no marked pane')));
 
   // A killed marked pane is no longer marked.
   await t.runString(`select-pane -m -t %${a}`);
@@ -219,7 +234,7 @@ test('swap-pane uses the marked pane when -s is omitted', async () => {
   const { t } = await boot('');
   await t.runString('split-window -h');
   await t.runString('split-window -v');
-  const w = t.server.window!;
+  const w = must(t.server.window);
   const [a, b, c] = panesInOrder(w.layout);
   await t.runString(`select-pane -m -t %${a}`);
   await t.runString(`swap-pane -t %${c}`);
@@ -228,10 +243,10 @@ test('swap-pane uses the marked pane when -s is omitted', async () => {
 
 test('default bindings include m/M and the < > menus', async () => {
   const { t } = await boot('');
-  assert.deepEqual(t.lookupKey('prefix', 'm')!.commands, [['select-pane', '-m']]);
-  assert.deepEqual(t.lookupKey('prefix', 'M')!.commands, [['select-pane', '-M']]);
-  assert.equal(t.lookupKey('prefix', '<')!.commands[0][0], 'display-menu');
-  assert.equal(t.lookupKey('prefix', '>')!.commands[0][0], 'display-menu');
+  assert.deepEqual(must(t.lookupKey('prefix', 'm')).commands, [['select-pane', '-m']]);
+  assert.deepEqual(must(t.lookupKey('prefix', 'M')).commands, [['select-pane', '-M']]);
+  assert.equal(must(t.lookupKey('prefix', '<')).commands[0][0], 'display-menu');
+  assert.equal(must(t.lookupKey('prefix', '>')).commands[0][0], 'display-menu');
   assert.deepEqual(t.notices, []);
 });
 
@@ -248,7 +263,7 @@ set -g update-environment "DISPLAY SSH_AUTH_SOCK"
 set -ga update-environment " WAYLAND_DISPLAY"
 `);
   assert.deepEqual(errors(t), []);
-  assert.ok(!t.notices.some((n) => /unknown option/.test(n.message)), JSON.stringify(t.notices));
+  assert.ok(!t.notices.some((n) => n.message.includes('unknown option')), JSON.stringify(t.notices));
   assert.equal(t.getOption('command-alias[100]'), 'zoom=resize-pane -Z');
   assert.equal(t.getOption('command-alias[101]'), 'sv=split-window -v');
   assert.deepEqual(t.arrayOption('terminal-overrides'), [[0, 'xterm-256color:Tc']]);
@@ -258,7 +273,7 @@ set -ga update-environment " WAYLAND_DISPLAY"
   // Built-in aliases still work, user aliases get the remaining arguments.
   await t.runString('split-pane -h');
   await t.runString('sv');
-  const w = t.server.window!;
+  const w = must(t.server.window);
   assert.equal(panesInOrder(w.layout).length, 3);
   await t.runString('zoom');
   assert.equal(w.zoomed, true);
@@ -306,7 +321,7 @@ bind -n C-h if -F '#{pane_at_left}' '' 'select-pane -L'
 bind -n C-l if -F '#{pane_at_right}' '' 'select-pane -R'
 `);
   await t.runString('split-window -h');
-  const w = t.server.window!;
+  const w = must(t.server.window);
   const [left, right] = panesInOrder(w.layout);
   await t.handleKey({ table: 'root', key: 'C-l' });
   assert.equal(w.active, right, 'already at the right edge: no-op');
@@ -334,26 +349,26 @@ test('every tmux 3.4 command name resolves', () => {
 });
 
 test('display-menu runs the chosen item; disabled items and separators are skipped', async () => {
-  let shown: MenuOpts | undefined;
-  const ui = stubUi({ menu: async (opts: MenuOpts) => { shown = opts; return opts.items.find((i) => i.key === 'v'); } });
+  let shown: MenuOptions | undefined;
+  const ui = stubUi({ menu: async (opts: MenuOptions) => { shown = opts; return opts.items.find((i) => i.key === 'v'); } });
   const { t } = await boot('', { ui });
   await t.runString('display-menu -T "#[align=centre]Pane #{pane_index}" "Split" v { split-window -h } "" "-Nope" n { kill-server } "#{?pane_marked,Unmark,Mark}" m "select-pane -m"');
-  assert.equal(shown!.title, 'Pane 0');
-  assert.deepEqual(shown!.items.map((i) => (i.separator ? '---' : `${i.disabled ? '!' : ''}${i.label}`)), ['Split', '---', '!Nope', 'Mark']);
-  assert.equal(panesInOrder(t.server.window!.layout).length, 2);
+  assert.equal(must(shown).title, 'Pane 0');
+  assert.deepEqual(must(shown).items.map((i) => (i.separator ? '---' : `${i.disabled ? '!' : ''}${i.label}`)), ['Split', '---', '!Nope', 'Mark']);
+  assert.equal(panesInOrder(must(t.server.window).layout).length, 2);
 });
 
 test('the default pane menu (prefix >) runs block commands from a binding', async () => {
-  const ui = stubUi({ menu: async (opts: MenuOpts) => opts.items.find((i) => i.key === 'v') });
+  const ui = stubUi({ menu: async (opts: MenuOptions) => opts.items.find((i) => i.key === 'v') });
   const { t } = await boot('', { ui });
   await t.handleKey({ table: 'prefix', key: '>' });
-  assert.equal(panesInOrder(t.server.window!.layout).length, 2);
+  assert.equal(panesInOrder(must(t.server.window).layout).length, 2);
   assert.deepEqual(ui.messages, []);
 });
 
 test('display-popup opens URLs in a popup and runs tmux commands', async () => {
-  const popups: PopupOpts[] = [];
-  const ui = stubUi({ popup: (o: PopupOpts) => popups.push(o) });
+  const popups: PopupOptions[] = [];
+  const ui = stubUi({ popup: (o: PopupOptions) => popups.push(o) });
   const { t } = await boot('', { ui });
   await t.runString('display-popup -w 80% -h 60% -T Docs https://man7.org/linux/man-pages/man1/tmux.1.html');
   assert.equal(popups[0].url, 'https://man7.org/linux/man-pages/man1/tmux.1.html');
@@ -361,9 +376,9 @@ test('display-popup opens URLs in a popup and runs tmux commands', async () => {
   assert.equal(popups[0].title, 'Docs');
   // The classic "scratch session" popup.
   await t.runString('display-popup -E "tmux new-session -A -s scratch"');
-  assert.equal(t.server.session!.name, 'scratch');
+  assert.equal(must(t.server.session).name, 'scratch');
   await t.runString('display-popup -E "lazygit"');
-  assert.ok(ui.messages.some((m) => /can't run 'lazygit'/.test(m)));
+  assert.ok(ui.messages.some((m) => m.includes("can't run 'lazygit'")));
 });
 
 test('wait-for signals waiters and locks channels', async () => {
@@ -389,14 +404,14 @@ test('wait-for signals waiters and locks channels', async () => {
 });
 
 test('capture-pane, buffers and the clipboard', async () => {
-  let clip = null;
+  let clip: string | null = null;
   const ui = stubUi({
-    paneCommand: async (id: number, msg: { type: string }) => (msg.type === 'capture' ? { text: 'line one\nline two\nline three' } : null),
+    paneCommand: async (_id: number, msg: PaneCommandMessage) => (msg.type === 'capture' ? { text: 'line one\nline two\nline three' } : null),
     writeClipboard: (s: string) => { clip = s; },
   });
   const { t } = await boot('', { ui });
-  t.server.pane!.kind = 'web';
-  t.server.pane!.url = 'https://example.com';
+  must(t.server.pane).kind = 'web';
+  must(t.server.pane).url = 'https://example.com';
   await t.runString('capture-pane');
   assert.equal(t.buffers[0].data, 'line one\nline two\nline three');
   assert.equal(await capture(t, 'tmux capture-pane -p -S 1 -E 1'), 'line two\n');
@@ -446,9 +461,9 @@ run-shell "tmux set -g @loaded yes"
   assert.deepEqual(errors(t), []);
   assert.equal(t.getOption('@modern'), 'on');
   assert.equal(t.getOption('@loaded'), 'yes');
-  assert.ok(!t.notices.some((n) => /unknown option/.test(n.message)), JSON.stringify(t.notices.filter((n) => /unknown option/.test(n.message))));
+  assert.ok(!t.notices.some((n) => n.message.includes('unknown option')), JSON.stringify(t.notices.filter((n) => n.message.includes('unknown option'))));
   await t.runString('reload');
   // after-split-window hook runs select-layout -E.
   await t.handleKey({ table: 'prefix', key: '%' });
-  assert.equal(panesInOrder(t.server.window!.layout).length, 2);
+  assert.equal(panesInOrder(must(t.server.window).layout).length, 2);
 });
