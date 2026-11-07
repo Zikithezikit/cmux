@@ -1,11 +1,114 @@
-// @ts-nocheck
 // The "tmux server": sessions, windows and panes plus the operations that
 // mutate them. Pure state; rendering lives in src/workspace.
 
 import * as L from './layout.js';
+import type { LayoutNode, Pane, PaneKind, Session, SplitDir, Window } from './types.js';
+
+export type GetOption = (name: string) => unknown;
+
+export interface IdSequence {
+  session: number;
+  window: number;
+  pane: number;
+}
+
+/** The persisted server state (toJSON / load). */
+export interface ServerState {
+  version: 1;
+  sessions: Session[];
+  currentId: number | null;
+  lastSessionId: number | null;
+  panes: Record<string, Pane>;
+  seq: IdSequence;
+  created: number;
+}
+
+export interface SnapshotPane {
+  kind: PaneKind;
+  url: string;
+  title: string;
+  prefill: string;
+}
+
+export interface SnapshotWindow {
+  index: number;
+  name: string;
+  manualName: boolean;
+  zoomed: boolean;
+  layoutName: string | null;
+  layout: LayoutNode;
+  active: number;
+  panes: Record<string, SnapshotPane>;
+}
+
+export interface SnapshotSession {
+  name: string;
+  /** Index of the active window. */
+  active: number | null;
+  windows: SnapshotWindow[];
+}
+
+/** Layout/URL snapshot used by tmux-resurrect emulation. */
+export interface Snapshot {
+  version: 1;
+  savedAt: number;
+  current: string | null;
+  sessions: SnapshotSession[];
+}
+
+export interface PaneLocation {
+  session: Session;
+  window: Window;
+}
+
+export interface MakePaneOptions {
+  url?: string;
+  prefill?: string;
+}
+
+export interface NewSessionOptions {
+  name?: string;
+  url?: string;
+  prefill?: string;
+  windowName?: string;
+}
+
+export interface NewWindowOptions {
+  url?: string;
+  prefill?: string;
+  name?: string;
+  index?: number | null;
+  after?: boolean;
+  select?: boolean;
+  pane?: Pane;
+}
+
+export interface ServerSplitOptions extends L.SplitOptions, MakePaneOptions {
+  select?: boolean;
+}
+
+export interface JoinPaneOptions extends L.SplitOptions {
+  select?: boolean;
+}
+
+export interface BreakPaneOptions {
+  name?: string;
+  select?: boolean;
+  index?: number | null;
+  after?: boolean;
+}
 
 export class Server extends EventTarget {
-  constructor(getOption) {
+  declare getOption: GetOption;
+  declare sessions: Session[];
+  declare currentId: number | null;
+  declare lastSessionId: number | null;
+  declare panes: Record<number, Pane>;
+  declare seq: IdSequence;
+  declare created: number;
+  declare marked: number | null;
+
+  constructor(getOption: GetOption) {
     super();
     this.getOption = getOption;
     this.sessions = [];
@@ -18,7 +121,7 @@ export class Server extends EventTarget {
   }
 
   /** The marked pane id, or null if none (or it no longer exists). */
-  markedPane() {
+  markedPane(): number | null {
     if (this.marked == null) return null;
     if (!this.panes[this.marked] || !this.locate(this.marked)) { this.marked = null; return null; }
     return this.marked;
@@ -26,8 +129,8 @@ export class Server extends EventTarget {
 
   // ------------------------------------------------------------ persistence
 
-  toJSON() {
-    const panes = {};
+  toJSON(): ServerState {
+    const panes: Record<string, Pane> = {};
     for (const [id, p] of Object.entries(this.panes)) {
       panes[id] = { id: p.id, kind: p.kind, url: p.url, title: p.title, prefill: p.prefill };
     }
@@ -42,13 +145,13 @@ export class Server extends EventTarget {
     };
   }
 
-  load(json) {
+  load(json: Partial<ServerState> | null | undefined): boolean {
     if (!json || json.version !== 1 || !Array.isArray(json.sessions) || !json.sessions.length) return false;
     this.sessions = json.sessions;
     this.currentId = json.currentId ?? json.sessions[0].id;
     this.lastSessionId = json.lastSessionId ?? null;
     this.panes = {};
-    for (const [id, p] of Object.entries(json.panes || {})) this.panes[id] = { ...p, id: Number(id) };
+    for (const [id, p] of Object.entries(json.panes || {})) this.panes[id as unknown as number] = { ...p, id: Number(id) };
     this.seq = json.seq || this.seq;
     this.created = json.created || Date.now();
     // Drop panes that are referenced nowhere / windows whose panes vanished.
@@ -66,7 +169,7 @@ export class Server extends EventTarget {
   }
 
   /** Layout/URL snapshot used by tmux-resurrect emulation. */
-  snapshot() {
+  snapshot(): Snapshot {
     return {
       version: 1,
       savedAt: Date.now(),
@@ -92,7 +195,7 @@ export class Server extends EventTarget {
   }
 
   /** True when the server holds only the untouched initial session. */
-  isPristine() {
+  isPristine(): boolean {
     if (this.sessions.length !== 1) return false;
     const [s] = this.sessions;
     if (s.windows.length !== 1) return false;
@@ -105,7 +208,7 @@ export class Server extends EventTarget {
    * tmux-resurrect) unless the server is pristine, in which case it is replaced.
    * Returns the number of sessions restored.
    */
-  restore(snap) {
+  restore(snap: Snapshot | null | undefined): number {
     if (!snap || !Array.isArray(snap.sessions)) return 0;
     const replace = this.isPristine();
     if (replace) {
@@ -117,20 +220,20 @@ export class Server extends EventTarget {
     let restored = 0;
     for (const ss of snap.sessions) {
       if (this.sessionByName(ss.name)) continue;
-      const session = { id: ++this.seq.session, name: ss.name, windows: [], active: null, last: null, created: Date.now() };
+      const session: Session = { id: ++this.seq.session, name: ss.name, windows: [], active: null, last: null, created: Date.now() };
       for (const sw of ss.windows) {
-        const map = {};
+        const map: Record<string, number> = {};
         for (const [oldId, sp] of Object.entries(sw.panes || {})) {
           const id = ++this.seq.pane;
           map[oldId] = id;
           this.panes[id] = { id, kind: sp.kind === 'web' && sp.url ? 'web' : 'launcher', url: sp.url || '', title: sp.title || '', prefill: sp.prefill || '' };
         }
-        const remap = (n) => (n.type === 'pane'
+        const remap = (n: LayoutNode): LayoutNode => (n.type === 'pane'
           ? { type: 'pane', id: map[n.id] }
           : { ...n, children: n.children.map(remap) });
         const layout = remap(sw.layout);
         if (L.panesInOrder(layout).some((id) => id == null)) continue;
-        const w = {
+        const w: Window = {
           id: ++this.seq.window, index: sw.index, name: sw.name, manualName: !!sw.manualName,
           layout, active: map[sw.active] ?? L.panesInOrder(layout)[0], last: null,
           zoomed: !!sw.zoomed, layoutName: sw.layoutName || null,
@@ -155,18 +258,18 @@ export class Server extends EventTarget {
 
   // ---------------------------------------------------------------- lookups
 
-  get session() { return this.sessions.find((s) => s.id === this.currentId) || null; }
-  get window() { const s = this.session; return s ? this.activeWindow(s) : null; }
-  get pane() { const w = this.window; return w ? this.panes[w.active] : null; }
+  get session(): Session | null { return this.sessions.find((s) => s.id === this.currentId) || null; }
+  get window(): Window | null { const s = this.session; return s ? this.activeWindow(s) : null; }
+  get pane(): Pane | null { const w = this.window; return w ? this.panes[w.active] : null; }
 
-  activeWindow(session) {
+  activeWindow(session: Session): Window | null {
     return session.windows.find((w) => w.id === session.active) || session.windows[0] || null;
   }
 
-  sessionById(id) { return this.sessions.find((s) => s.id === id) || null; }
-  sessionByName(name) { return this.sessions.find((s) => s.name === name) || null; }
+  sessionById(id: number | null): Session | null { return this.sessions.find((s) => s.id === id) || null; }
+  sessionByName(name: string): Session | null { return this.sessions.find((s) => s.name === name) || null; }
 
-  locate(paneId) {
+  locate(paneId: number): PaneLocation | null {
     for (const s of this.sessions) {
       for (const w of s.windows) {
         if (L.findPath(w.layout, paneId)) return { session: s, window: w };
@@ -175,7 +278,7 @@ export class Server extends EventTarget {
     return null;
   }
 
-  windowById(id) {
+  windowById(id: number): PaneLocation | null {
     for (const s of this.sessions) {
       const w = s.windows.find((x) => x.id === id);
       if (w) return { session: s, window: w };
@@ -183,55 +286,55 @@ export class Server extends EventTarget {
     return null;
   }
 
-  paneIndex(window, paneId) {
+  paneIndex(window: Window, paneId: number): number {
     return L.panesInOrder(window.layout).indexOf(paneId) + Number(this.getOption('pane-base-index') || 0);
   }
 
-  panesOf(window) { return L.panesInOrder(window.layout); }
+  panesOf(window: Window): number[] { return L.panesInOrder(window.layout); }
 
-  windowName(window) {
+  windowName(window: Window): string {
     if (window.manualName || this.getOption('automatic-rename') !== 'on') return window.name;
     const p = this.panes[window.active];
     return p ? paneShortName(p) : window.name;
   }
 
-  sortedWindows(session) { return session.windows.slice().sort((a, b) => a.index - b.index); }
+  sortedWindows(session: Session): Window[] { return session.windows.slice().sort((a, b) => a.index - b.index); }
 
   // -------------------------------------------------------------- creation
 
-  makePane({ url = '', prefill = '' } = {}) {
+  makePane({ url = '', prefill = '' }: MakePaneOptions = {}): Pane {
     const id = ++this.seq.pane;
-    const pane = url
+    const pane: Pane = url
       ? { id, kind: 'web', url, title: '', prefill: '' }
       : { id, kind: 'launcher', url: '', title: '', prefill };
     this.panes[id] = pane;
     return pane;
   }
 
-  freeIndex(session, from) {
+  freeIndex(session: Session, from?: number | null): number {
     const used = new Set(session.windows.map((w) => w.index));
     let i = from ?? Number(this.getOption('base-index') || 0);
     while (used.has(i)) i++;
     return i;
   }
 
-  newSession({ name, url, prefill, windowName } = {}) {
+  newSession({ name, url, prefill, windowName }: NewSessionOptions = {}): Session {
     const id = ++this.seq.session;
     if (!name) {
       let n = 0;
       while (this.sessionByName(String(n))) n++;
       name = String(n);
     }
-    const session = { id, name, windows: [], active: null, last: null, created: Date.now() };
+    const session: Session = { id, name, windows: [], active: null, last: null, created: Date.now() };
     this.sessions.push(session);
     this.newWindow(session, { url, prefill, name: windowName });
     this.switchTo(session);
     return session;
   }
 
-  newWindow(session, { url, prefill, name, index, after = false, select = true, pane } = {}) {
+  newWindow(session: Session, { url, prefill, name, index, after = false, select = true, pane }: NewWindowOptions = {}): Window {
     const p = pane || this.makePane({ url, prefill });
-    let idx;
+    let idx: number;
     if (index != null) {
       idx = index;
       if (session.windows.some((w) => w.index === idx)) this.shiftFrom(session, idx);
@@ -242,7 +345,7 @@ export class Server extends EventTarget {
     } else {
       idx = this.freeIndex(session);
     }
-    const window = {
+    const window: Window = {
       id: ++this.seq.window,
       index: idx,
       name: name || paneShortName(p),
@@ -258,11 +361,11 @@ export class Server extends EventTarget {
     return window;
   }
 
-  shiftFrom(session, idx) {
+  shiftFrom(session: Session, idx: number): void {
     for (const w of session.windows) if (w.index >= idx) w.index++;
   }
 
-  splitPane(window, targetId, dir, opts = {}) {
+  splitPane(window: Window, targetId: number, dir: SplitDir, opts: ServerSplitOptions = {}): Pane {
     const p = this.makePane(opts);
     window.zoomed = false;
     window.layout = L.splitPane(window.layout, targetId, p.id, dir, opts);
@@ -272,19 +375,19 @@ export class Server extends EventTarget {
 
   // -------------------------------------------------------------- selection
 
-  switchTo(session) {
+  switchTo(session: Session | null | undefined): void {
     if (!session || session.id === this.currentId) return;
     this.lastSessionId = this.currentId;
     this.currentId = session.id;
   }
 
-  selectWindow(session, window) {
+  selectWindow(session: Session, window: Window | null | undefined): void {
     if (!window || session.active === window.id) return;
     session.last = session.active;
     session.active = window.id;
   }
 
-  selectPane(window, paneId) {
+  selectPane(window: Window, paneId: number): void {
     if (!this.panes[paneId] || window.active === paneId) return;
     if (window.zoomed) window.zoomed = false;
     window.last = window.active;
@@ -293,20 +396,20 @@ export class Server extends EventTarget {
 
   // ---------------------------------------------------------------- removal
 
-  killPane(paneId) {
+  killPane(paneId: number): void {
     const loc = this.locate(paneId);
     if (!loc) return;
     const { session, window } = loc;
-    window.layout = L.removePane(window.layout, paneId);
+    window.layout = L.removePane(window.layout, paneId)!;
     delete this.panes[paneId];
     if (!window.layout) { this.killWindow(session, window); return; }
     window.zoomed = false;
     const ids = L.panesInOrder(window.layout);
-    if (window.last === paneId || !ids.includes(window.last)) window.last = null;
+    if (window.last === paneId || !ids.includes(window.last as number)) window.last = null;
     if (window.active === paneId) window.active = window.last && ids.includes(window.last) ? window.last : ids[0];
   }
 
-  killWindow(session, window) {
+  killWindow(session: Session, window: Window): void {
     for (const id of L.panesInOrder(window.layout)) delete this.panes[id];
     const sorted = this.sortedWindows(session);
     const pos = sorted.indexOf(window);
@@ -322,47 +425,47 @@ export class Server extends EventTarget {
     if (this.getOption('renumber-windows') === 'on') this.renumber(session);
   }
 
-  killSession(session) {
+  killSession(session: Session): void {
     for (const w of session.windows) for (const id of L.panesInOrder(w.layout)) delete this.panes[id];
     this.sessions = this.sessions.filter((s) => s !== session);
     if (this.currentId === session.id) {
       const last = this.sessionById(this.lastSessionId);
-      this.currentId = (last || this.sessions[0] || {}).id ?? null;
+      this.currentId = (last || this.sessions[0] || {} as Partial<Session>).id ?? null;
       this.lastSessionId = null;
     }
     if (this.lastSessionId === session.id) this.lastSessionId = null;
   }
 
-  renumber(session) {
+  renumber(session: Session): void {
     const base = Number(this.getOption('base-index') || 0);
     this.sortedWindows(session).forEach((w, i) => { w.index = base + i; });
   }
 
   // ------------------------------------------------------------- reshaping
 
-  breakPane(paneId, { name, select = true, index, after } = {}) {
+  breakPane(paneId: number, { name, select = true, index, after }: BreakPaneOptions = {}): Window | null {
     const loc = this.locate(paneId);
     if (!loc) return null;
     const { session, window } = loc;
     if (L.panesInOrder(window.layout).length < 2) return window;
-    window.layout = L.removePane(window.layout, paneId);
+    window.layout = L.removePane(window.layout, paneId)!;
     window.zoomed = false;
     if (window.active === paneId) {
       const ids = L.panesInOrder(window.layout);
-      window.active = ids.includes(window.last) ? window.last : ids[0];
+      window.active = ids.includes(window.last as number) ? window.last as number : ids[0];
       window.last = null;
     }
     return this.newWindow(session, { pane: this.panes[paneId], name, select, index, after });
   }
 
-  joinPane(paneId, targetWindow, targetPaneId, dir, opts = {}) {
+  joinPane(paneId: number, targetWindow: Window, targetPaneId: number, dir: SplitDir, opts: JoinPaneOptions = {}): void {
     const loc = this.locate(paneId);
     if (!loc || loc.window === targetWindow) return;
     const { session, window } = loc;
-    window.layout = L.removePane(window.layout, paneId);
+    window.layout = L.removePane(window.layout, paneId)!;
     if (!window.layout) {
       session.windows = session.windows.filter((w) => w !== window);
-      if (session.active === window.id) session.active = (session.windows[0] || {}).id;
+      if (session.active === window.id) session.active = (session.windows[0] || {} as Partial<Window>).id!;
       if (!session.windows.length) this.killSession(session);
     } else if (window.active === paneId) {
       window.active = L.panesInOrder(window.layout)[0];
@@ -372,14 +475,14 @@ export class Server extends EventTarget {
     if (opts.select !== false) this.selectPane(targetWindow, paneId);
   }
 
-  swapWindows(session, a, b) {
+  swapWindows(session: Session, a: Window, b: Window): void {
     [a.index, b.index] = [b.index, a.index];
   }
 
-  moveWindow(session, window, index, targetSession = session) {
+  moveWindow(session: Session, window: Window, index: number, targetSession: Session = session): void {
     if (targetSession !== session) {
       session.windows = session.windows.filter((w) => w !== window);
-      if (session.active === window.id) session.active = (session.windows[0] || {}).id;
+      if (session.active === window.id) session.active = (session.windows[0] || {} as Partial<Window>).id!;
       if (!session.windows.length) this.killSession(session);
       targetSession.windows.push(window);
     }
@@ -390,7 +493,7 @@ export class Server extends EventTarget {
 }
 
 /** Short name for a pane: hostname for web panes (like tmux's command name). */
-export function paneShortName(p) {
+export function paneShortName(p: Pane | null | undefined): string {
   if (!p) return '';
   if (p.kind !== 'web' || !p.url) return 'new';
   try {
