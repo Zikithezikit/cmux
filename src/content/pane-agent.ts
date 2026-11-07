@@ -13,7 +13,7 @@
   if (window === window.top) return;
   const ext = 'chrome-extension://' + chrome.runtime.id;
   const anc = location.ancestorOrigins;
-  if (!anc || !anc.length || anc[anc.length - 1] !== ext) return;
+  if (!anc?.length || anc[anc.length - 1] !== ext) return;
 
   const K = globalThis.CtmuxKeys;
   const isRoot = anc.length === 1;
@@ -23,45 +23,60 @@
     return m ? Number(m[1]) : null;
   };
 
-  interface CopyBinding {
-    /** A `send -X` command run inside the page. */
-    local?: string[];
-    remote?: boolean;
-  }
+  // A classic script cannot `import type`; an import() type does not make it a module.
+  /** The workspace's runtime config (stored under 'ctmux:runtime' by Tmux.runtimeConfig()). */
+  type RuntimeConfig = Partial<import('../core/tmux.js').RuntimeConfig>;
 
-  /** The workspace's runtime config (stored under 'ctmux:runtime'). */
-  interface RuntimeConfig extends CtmuxRouterConfig {
-    copy?: Record<string, Record<string, CopyBinding>>;
-    modeKeys?: string;
-    modeColours?: { fg?: string; bg?: string };
-    mouse?: boolean;
-    yank?: { mouse: boolean } | null;
-  }
+  /** Stored by the workspace page, the only writer: trusted once it is an object. */
+  const isRuntimeConfig = (value: unknown): value is RuntimeConfig => typeof value === 'object' && value !== null;
 
-  /** A command the workspace sends to this pane. */
-  interface PaneCommand {
-    ctmux: true;
-    type: string;
-    table?: string;
-    scrollUp?: boolean;
-    args: string[];
-    action?: string;
-    text: string;
-    keys?: string[];
-    literal?: boolean;
-    all?: boolean;
-    limit?: number;
+  type CopyGranularity = 'character' | 'word' | 'line' | 'lineboundary' | 'documentboundary';
+  type Direction = 'forward' | 'backward';
+
+  /** A command the workspace sends to this pane (see Workspace.paneCommand()). */
+  type PaneCommand = { ctmux: true } & (
+    | { type: 'copy-mode'; table?: string; scrollUp?: boolean }
+    | { type: 'copy-cmd'; args: string[] }
+    | { type: 'nav'; action?: string }
+    | { type: 'paste'; text: string }
+    | { type: 'send-keys'; keys?: string[]; literal?: boolean }
+    | { type: 'capture'; all?: boolean }
+    | { type: 'collect-links'; limit?: number }
+    | { type: 'set-table'; table?: string }
+  );
+
+  const PANE_COMMAND_TYPES: ReadonlySet<string> = new Set<PaneCommand['type']>([
+    'copy-mode', 'copy-cmd', 'nav', 'paste', 'send-keys', 'capture', 'collect-links', 'set-table',
+  ]);
+
+  /** Messages come from the workspace page; anything else is ignored. */
+  function isPaneCommand(msg: unknown): msg is PaneCommand {
+    return typeof msg === 'object' && msg !== null && 'ctmux' in msg && msg.ctmux === true
+      && 'type' in msg && typeof msg.type === 'string' && PANE_COMMAND_TYPES.has(msg.type);
   }
 
   /** Non-standard window.find() (Chrome supports it; lib.dom does not declare it). */
   interface FindWindow extends Window {
     find?(text: string, caseSensitive: boolean, backwards: boolean, wrap: boolean, wholeWord: boolean, searchInFrames: boolean, showDialog: boolean): boolean;
   }
+  const findWindow: FindWindow = window;
+
+  /** The document's selection (only null for a frame without a browsing context). */
+  function selection(): Selection {
+    const sel = window.getSelection();
+    if (!sel) throw new Error('no selection');
+    return sel;
+  }
 
   let cfg: RuntimeConfig = { prefix: 'C-b', tables: {}, repeat: {}, copy: {}, repeatTime: 500 };
-  chrome.storage.local.get('ctmux:runtime').then((r) => { if (r['ctmux:runtime']) cfg = r['ctmux:runtime'] as RuntimeConfig; }).catch(() => {});
+  chrome.storage.local.get('ctmux:runtime').then((r) => {
+    const stored: unknown = r['ctmux:runtime'];
+    if (isRuntimeConfig(stored)) cfg = stored;
+  }).catch(() => {});
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes['ctmux:runtime']) cfg = (changes['ctmux:runtime'].newValue as RuntimeConfig | undefined) || cfg;
+    if (area !== 'local' || !changes['ctmux:runtime']) return;
+    const next: unknown = changes['ctmux:runtime'].newValue;
+    if (isRuntimeConfig(next)) cfg = next;
   });
 
   const send = (msg: Record<string, unknown>) => {
@@ -86,9 +101,9 @@
     if (copy.active && router.table === 'root' && key !== cfg.prefix && key !== cfg.prefix2) {
       swallow(e);
       if (copy.searching) return;
-      const b = cfg.copy && cfg.copy[copy.table] && cfg.copy[copy.table][key];
+      const b = cfg.copy?.[copy.table]?.[key];
       if (!b) return;
-      if (b.local) copy.exec(b.local);
+      if ('local' in b) void copy.exec(b.local);
       else send({ ctmux: 'key', table: copy.table, key });
       return;
     }
@@ -135,12 +150,13 @@
   window.addEventListener('mousedown', focused, true);
 
   let lastEditable: HTMLElement | null = null;
-  const isEditable = (el: HTMLElement | null) => el && (el.isContentEditable || /^(INPUT|TEXTAREA)$/.test(el.tagName));
-  document.addEventListener('focusin', (e) => { if (isEditable(e.target as HTMLElement)) lastEditable = e.target as HTMLElement; }, true);
+  const isEditable = (el: EventTarget | null): el is HTMLElement =>
+    el instanceof HTMLElement && (el.isContentEditable || /^(INPUT|TEXTAREA)$/.test(el.tagName));
+  document.addEventListener('focusin', (e) => { if (isEditable(e.target)) lastEditable = e.target; }, true);
 
   // ------------------------------------------------------------- clipboard
 
-  async function writeClipboard(text: string) {
+  async function writeClipboard(text: string): Promise<boolean> {
     try {
       await navigator.clipboard.writeText(text);
       return true;
@@ -150,7 +166,7 @@
         ta.value = text;
         ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
         (document.body || document.documentElement).appendChild(ta);
-        const sel = window.getSelection()!;
+        const sel = selection();
         const saved = sel.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
         ta.select();
         const ok = document.execCommand('copy');
@@ -163,15 +179,15 @@
     }
   }
 
-  async function yank(text: string) {
+  async function yank(text: string): Promise<void> {
     if (!text) return;
     const copied = await writeClipboard(text);
     send({ ctmux: 'yank', text, copied });
   }
 
-  function insertText(text: string) {
-    let el = document.activeElement as HTMLElement | null;
-    if (!isEditable(el) && lastEditable && document.contains(lastEditable)) { el = lastEditable; el.focus(); }
+  function insertText(text: string): boolean {
+    let el: Element | null = document.activeElement;
+    if (!isEditable(el) && lastEditable && document.contains(lastEditable)) { el = lastEditable; lastEditable.focus(); }
     if (!isEditable(el)) return false;
     return document.execCommand('insertText', false, text);
   }
@@ -184,25 +200,26 @@
     selecting: false,
     searching: false,
     lastSearch: null as string | null,
-    lastDir: 'forward',
+    lastDir: 'forward' as Direction,
     host: null as HTMLElement | null,
     cursor: null as HTMLElement | null,
     badge: null as HTMLElement | null,
 
-    ui() {
-      if (this.host) return;
-      this.host = document.createElement('ctmux-copy-mode');
-      this.host.style.cssText = 'all:initial;position:fixed;inset:0;pointer-events:none;z-index:2147483647';
-      const root = this.host.attachShadow({ mode: 'closed' });
-      const colours = cfg.modeColours || {};
-      const bg = colours.bg || '#e5e510';
-      const fg = colours.fg || '#000';
+    ui(): HTMLElement {
+      if (this.host) return this.host;
+      const host = document.createElement('ctmux-copy-mode');
+      this.host = host;
+      host.style.cssText = 'all:initial;position:fixed;inset:0;pointer-events:none;z-index:2147483647';
+      const root = host.attachShadow({ mode: 'closed' });
+      const bg = cfg.modeColours?.bg || '#e5e510';
+      const fg = cfg.modeColours?.fg || '#000';
       root.innerHTML = `<style>
         .c{position:fixed;background:${bg};opacity:.75;mix-blend-mode:normal;animation:b 1s steps(1) infinite}
         .b{position:fixed;top:0;right:0;font:12px/18px monospace;padding:0 6px;background:${bg};color:${fg}}
         @keyframes b{50%{opacity:.25}}</style><div class="c"></div><div class="b"></div>`;
       this.cursor = root.querySelector<HTMLElement>('.c');
       this.badge = root.querySelector<HTMLElement>('.b');
+      return host;
     },
 
     setBadge(extra?: string) {
@@ -214,17 +231,17 @@
 
     enter(table?: string, scrollUp?: boolean) {
       this.table = table || 'copy-mode-vi';
-      this.ui();
-      if (!this.host!.isConnected) document.documentElement.appendChild(this.host!);
+      const host = this.ui();
+      if (!host.isConnected) document.documentElement.appendChild(host);
       this.active = true;
-      const sel = window.getSelection()!;
+      const sel = selection();
       if (sel.rangeCount && !sel.isCollapsed && inView(focusRect())) {
         this.selecting = true;
       } else {
         this.selecting = false;
-        placeCaretAt(16, 8, false) || placeCaretAtStart();
+        if (!placeCaretAt(16, 8, false)) placeCaretAtStart();
       }
-      if (scrollUp) this.exec(['halfpage-up']);
+      if (scrollUp) void this.exec(['halfpage-up']);
       this.draw();
       send({ ctmux: 'mode', mode: 'copy-mode' });
     },
@@ -234,7 +251,7 @@
       this.active = false;
       this.selecting = false;
       this.searching = false;
-      const sel = window.getSelection()!;
+      const sel = selection();
       if (sel.rangeCount && !sel.isCollapsed) sel.collapse(sel.focusNode, sel.focusOffset);
       if (this.host) this.host.remove();
       send({ ctmux: 'mode', mode: null });
@@ -243,26 +260,28 @@
     draw(extra?: string) {
       if (!this.active) return;
       const r = focusRect();
-      if (r) {
-        Object.assign(this.cursor!.style, {
-          left: `${r.left}px`, top: `${r.top}px`, width: `${Math.max(2, r.width || 8)}px`, height: `${r.height || lineHeight()}px`, display: 'block',
-        });
-      } else {
-        this.cursor!.style.display = 'none';
+      if (this.cursor) {
+        if (r) {
+          Object.assign(this.cursor.style, {
+            left: `${r.left}px`, top: `${r.top}px`, width: `${Math.max(2, r.width || 8)}px`, height: `${r.height || lineHeight()}px`, display: 'block',
+          });
+        } else {
+          this.cursor.style.display = 'none';
+        }
       }
       this.setBadge(extra);
     },
 
-    move(dir: string, gran: string) {
-      const sel = window.getSelection()!;
-      if (!sel.rangeCount) placeCaretAt(16, 8, false) || placeCaretAtStart();
+    move(dir: Direction, gran: CopyGranularity) {
+      const sel = selection();
+      if (!sel.rangeCount && !placeCaretAt(16, 8, false)) placeCaretAtStart();
       sel.modify(this.selecting ? 'extend' : 'move', dir, gran);
       ensureVisible();
     },
 
-    async exec(args: string[]) {
+    async exec(args: readonly string[]): Promise<void> {
       const [cmd, ...rest] = args;
-      const sel = window.getSelection()!;
+      const sel = selection();
       const s = scroller();
       const lh = lineHeight();
       switch (cmd) {
@@ -313,7 +332,7 @@
           this.move('forward', 'word');
           break;
         case 'other-end':
-          if (sel.rangeCount) sel.setBaseAndExtent(sel.focusNode!, sel.focusOffset, sel.anchorNode!, sel.anchorOffset);
+          if (sel.rangeCount && sel.focusNode && sel.anchorNode) sel.setBaseAndExtent(sel.focusNode, sel.focusOffset, sel.anchorNode, sel.anchorOffset);
           ensureVisible();
           break;
         case 'rectangle-toggle':
@@ -330,7 +349,7 @@
         case 'search-again': this.search(this.lastSearch, this.lastDir); return;
         case 'search-reverse': this.search(this.lastSearch, this.lastDir === 'forward' ? 'backward' : 'forward', true); return;
         case 'copy-line':
-          this.exec(['select-line']);
+          void this.exec(['select-line']);
           await yank(sel.toString());
           this.exit();
           return;
@@ -341,7 +360,7 @@
           this.selecting = true;
           this.move('forward', 'lineboundary');
           await yank(sel.toString());
-          if (cmd.endsWith('-and-cancel')) this.exit(); else this.exec(['clear-selection']);
+          if (cmd.endsWith('-and-cancel')) this.exit(); else void this.exec(['clear-selection']);
           return;
         case 'copy-selection':
         case 'copy-selection-no-clear':
@@ -356,7 +375,7 @@
           await yank(text);
           if (cmd === 'copy-selection-and-paste') { this.exit(); insertText(text); return; }
           if (cmd.endsWith('-and-cancel')) { this.exit(); return; }
-          if (!cmd.endsWith('-no-clear')) this.exec(['clear-selection']);
+          if (!cmd.endsWith('-no-clear')) void this.exec(['clear-selection']);
           break;
         }
         default:
@@ -366,23 +385,23 @@
       this.draw();
     },
 
-    search(term: string | null | undefined, dir: string, reverse?: boolean) {
+    search(term: string | null | undefined, dir: Direction, reverse?: boolean) {
       if (!term) { this.draw('(no search)'); return; }
       this.lastSearch = term;
       if (!reverse) this.lastDir = dir;
-      const sel = window.getSelection()!;
-      const anchor: [Node | null, number] | null = this.selecting && sel.rangeCount ? [sel.anchorNode, sel.anchorOffset] : null;
+      const sel = selection();
+      const anchor: [Node, number] | null = this.selecting && sel.rangeCount && sel.anchorNode ? [sel.anchorNode, sel.anchorOffset] : null;
       if (dir === 'forward' && sel.rangeCount) {
         sel.collapse(sel.focusNode, sel.focusOffset);
         sel.modify('move', 'forward', 'character');
       } else if (sel.rangeCount) {
         sel.collapse(sel.focusNode, sel.focusOffset);
       }
-      const found = (window as FindWindow).find!(term, false, dir === 'backward', true, false, false, false);
+      const found = findWindow.find?.(term, false, dir === 'backward', true, false, false, false) ?? false;
       if (!found) { this.draw(`(not found: ${term})`); return; }
       const start = sel.getRangeAt(0);
       const node = start.startContainer, off = start.startOffset;
-      if (anchor) sel.setBaseAndExtent(anchor[0]!, anchor[1], node, off);
+      if (anchor) sel.setBaseAndExtent(anchor[0], anchor[1], node, off);
       else sel.collapse(node, off);
       ensureVisible();
       this.draw();
@@ -408,7 +427,7 @@
   }
 
   function focusRect() {
-    const sel = window.getSelection()!;
+    const sel = selection();
     if (!sel.rangeCount || !sel.focusNode) return null;
     const r = document.createRange();
     try {
@@ -417,8 +436,8 @@
     } catch { return null; }
     let rect = r.getClientRects()[0] || r.getBoundingClientRect();
     if ((!rect || (!rect.width && !rect.height && !rect.top && !rect.left)) && sel.focusNode.nodeType === 1) {
-      const child = sel.focusNode.childNodes[sel.focusOffset] as Element || sel.focusNode as Element;
-      if (child.getBoundingClientRect) rect = child.getBoundingClientRect();
+      const child = sel.focusNode.childNodes[sel.focusOffset] || sel.focusNode;
+      if (child instanceof Element) rect = child.getBoundingClientRect();
     }
     if (!rect) return null;
     // A collapsed caret has zero width: show a character-sized block.
@@ -438,7 +457,7 @@
 
   function caretRangeAt(x: number, y: number) {
     if (document.caretRangeFromPoint) return document.caretRangeFromPoint(x, y);
-    const p = document.caretPositionFromPoint && document.caretPositionFromPoint(x, y);
+    const p = document.caretPositionFromPoint?.(x, y);
     if (!p) return null;
     const r = document.createRange();
     r.setStart(p.offsetNode, p.offset);
@@ -447,11 +466,11 @@
 
   /** Put the caret at the first text found scanning down from (x, y). */
   function placeCaretAt(x: number, y: number, extend: boolean) {
-    const sel = window.getSelection()!;
+    const sel = selection();
     for (let yy = Math.max(1, y); yy < innerHeight; yy += 8) {
       for (const xx of [x, x + 40, innerWidth / 4, innerWidth / 2]) {
         const r = caretRangeAt(xx, yy);
-        if (r && r.startContainer.nodeType === 3 && r.startContainer.textContent!.trim()) {
+        if (r?.startContainer.nodeType === 3 && r.startContainer.textContent?.trim()) {
           if (extend && sel.rangeCount) sel.extend(r.startContainer, r.startOffset);
           else sel.collapse(r.startContainer, r.startOffset);
           return true;
@@ -463,10 +482,10 @@
 
   function placeCaretAtStart() {
     const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT, {
-      acceptNode: (n) => (n.textContent!.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP),
+      acceptNode: (n) => (n.textContent?.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP),
     });
     const n = walker.nextNode();
-    if (n) window.getSelection()!.collapse(n, 0);
+    if (n) selection().collapse(n, 0);
     return !!n;
   }
 
@@ -489,13 +508,13 @@
   let downAt: [number, number] | null = null;
   window.addEventListener('mousedown', (e) => { downAt = e.button === 0 ? [e.clientX, e.clientY] : null; }, true);
   window.addEventListener('mouseup', (e) => {
-    if (!cfg.yank || !cfg.yank.mouse || !cfg.mouse || !downAt || e.button !== 0) return;
+    if (!cfg.yank?.mouse || !cfg.mouse || !downAt || e.button !== 0) return;
     const moved = Math.abs(e.clientX - downAt[0]) + Math.abs(e.clientY - downAt[1]) > 4;
     downAt = null;
-    if (!moved || isEditable(document.activeElement as HTMLElement | null)) return;
+    if (!moved || isEditable(document.activeElement)) return;
     setTimeout(() => {
-      const text = window.getSelection()!.toString();
-      if (text) { yank(text); if (copy.active) copy.exit(); }
+      const text = selection().toString();
+      if (text) { void yank(text); if (copy.active) copy.exit(); }
     }, 0);
   }, true);
 
@@ -518,13 +537,14 @@
     return out;
   }
 
-  function sendKeys(keys: string[], literal?: boolean) {
+  function sendKeys(keys: readonly string[], literal?: boolean) {
     for (const k of keys) {
       if (literal) { insertText(k); continue; }
       switch (K.normalizeKey(k)) {
         case 'Enter': {
-          const el = document.activeElement as HTMLInputElement | null;
-          if (el && el.form && el.form.requestSubmit) el.form.requestSubmit();
+          // Form controls (input, button, select, ...) expose their owning form.
+          const el = document.activeElement;
+          if (el && 'form' in el && el.form instanceof HTMLFormElement) el.form.requestSubmit();
           else insertText('\n');
           break;
         }
@@ -538,8 +558,8 @@
     }
   }
 
-  chrome.runtime.onMessage.addListener((msg: PaneCommand | undefined, sender, sendResponse) => {
-    if (!msg || msg.ctmux !== true || sender.id !== chrome.runtime.id) return false;
+  chrome.runtime.onMessage.addListener((msg: unknown, sender, sendResponse) => {
+    if (!isPaneCommand(msg) || sender.id !== chrome.runtime.id) return false;
     switch (msg.type) {
       case 'copy-mode':
         copy.enter(msg.table, msg.scrollUp);
@@ -547,7 +567,7 @@
         return false;
       case 'copy-cmd':
         if (!copy.active && msg.args[0] !== 'cancel') { sendResponse(false); return false; }
-        Promise.resolve(copy.exec(msg.args)).then(() => sendResponse(true));
+        void copy.exec(msg.args).then(() => sendResponse(true));
         return true;
       case 'nav':
         if (msg.action === 'back') history.back();

@@ -12,8 +12,8 @@ export interface ConfRecord {
   text?: string;
   /** Uploaded file name. */
   name?: string;
-  /** 'path' | 'upload' | 'paste'. */
-  origin?: string;
+  /** How the text was provided. */
+  origin?: 'path' | 'upload' | 'paste';
   updatedAt?: number;
 }
 
@@ -23,11 +23,17 @@ export interface MainConfig {
   error: string | null;
 }
 
-export async function getConfRecord(): Promise<ConfRecord | null> {
-  return ((await chrome.storage.local.get(CONF_KEY))[CONF_KEY] as ConfRecord | undefined) || null;
+/** Stored data is untrusted in shape; the options page is its only writer. */
+function isConfRecord(value: unknown): value is ConfRecord {
+  return typeof value === 'object' && value !== null;
 }
 
-export async function setConfRecord(rec: ConfRecord): Promise<void> {
+export async function getConfRecord(): Promise<ConfRecord | null> {
+  const stored: unknown = (await chrome.storage.local.get(CONF_KEY))[CONF_KEY];
+  return isConfRecord(stored) ? stored : null;
+}
+
+export async function setConfRecord(rec: Readonly<ConfRecord>): Promise<void> {
   await chrome.storage.local.set({ [CONF_KEY]: { ...rec, updatedAt: Date.now() } });
 }
 
@@ -63,7 +69,7 @@ export function expandHome(path: string, home: string | null | undefined): strin
   return path.replace(/^~(?=\/|$)/, home).replace(/^\$HOME(?=\/|$)/, home).replace(/^\$\{HOME\}(?=\/|$)/, home);
 }
 
-const MAIN_CONF = [/^~\/\.tmux\.conf$/, /^~\/\.config\/tmux\/tmux\.conf$/, /^\$XDG_CONFIG_HOME\/tmux\/tmux\.conf$/, /^\$HOME\/\.tmux\.conf$/];
+const MAIN_CONF: readonly RegExp[] = [/^~\/\.tmux\.conf$/, /^~\/\.config\/tmux\/tmux\.conf$/, /^\$XDG_CONFIG_HOME\/tmux\/tmux\.conf$/, /^\$HOME\/\.tmux\.conf$/];
 
 /**
  * Load the main configuration. Re-reads from disk when a path is configured,
@@ -81,7 +87,7 @@ export async function loadMainConfig(): Promise<MainConfig> {
       return {
         text: rec.text || '',
         label: `${rec.path} (cached copy)`,
-        error: `could not re-read ${rec.path}: ${(err as Error).message}`,
+        error: `could not re-read ${rec.path}: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
   }
