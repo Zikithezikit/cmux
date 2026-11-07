@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Prints the Chrome profile directory (e.g. "Default", "Profile 1") that has
 // the given extension installed, or nothing. Used by `make app`.
 //

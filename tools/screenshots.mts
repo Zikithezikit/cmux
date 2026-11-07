@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Regenerates the README screenshots in docs/screenshots/ by driving the
 // extension in Chromium with real websites in the panes.
 //
@@ -9,6 +8,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { Page } from 'playwright-core';
+
+/** The bits of the workspace's debug handle (`window.ctmux`) used below. */
+interface CtmuxDebug {
+  t: {
+    runString(cmd: string): unknown;
+    plugins: { fetchMetadata(): Promise<unknown> };
+  };
+}
+declare const window: Window & { ctmux: CtmuxDebug };
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, 'docs/screenshots');
@@ -18,7 +27,7 @@ const SIZE = { width: 1440, height: 820 };
 function findChromium() {
   if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
   const root = process.env.PLAYWRIGHT_BROWSERS_PATH || path.join(os.homedir(), '.cache/ms-playwright');
-  const dirs = fs.existsSync(root) ? fs.readdirSync(root).filter((d) => /^chromium-\d+$/.test(d)).sort((a, b) => b.split('-')[1] - a.split('-')[1]) : [];
+  const dirs = fs.existsSync(root) ? fs.readdirSync(root).filter((d) => /^chromium-\d+$/.test(d)).sort((a, b) => (b.split('-')[1] as unknown as number) - (a.split('-')[1] as unknown as number)) : [];
   for (const d of dirs) {
     const p = path.join(root, d, 'chrome-linux64/chrome');
     if (fs.existsSync(p)) return p;
@@ -34,8 +43,8 @@ const ctx = await chromium.launchPersistentContext(tmp, {
   args: ['--headless=new', `--disable-extensions-except=${ROOT}`, `--load-extension=${ROOT}`],
   viewport: SIZE,
 });
-const pause = (ms) => new Promise((r) => setTimeout(r, ms));
-const shot = async (page, name) => {
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const shot = async (page: Page, name: string) => {
   await page.screenshot({ path: path.join(OUT, `${name}.png`) });
   console.log(`docs/screenshots/${name}.png`);
 };
@@ -52,15 +61,15 @@ try {
   await opts.fill('#text', CONF);
   await opts.click('#save-text');
   await pause(600);
-  await opts.evaluate(() => { document.getElementById('status').textContent = ''; document.getElementById('text').scrollTop = 0; window.scrollTo(0, 0); });
+  await opts.evaluate(() => { document.getElementById('status')!.textContent = ''; document.getElementById('text')!.scrollTop = 0; window.scrollTo(0, 0); });
   await shot(opts, 'options');
   await opts.close();
 
   const ws = await ctx.newPage();
   await ws.goto(`chrome-extension://${id}/src/workspace/workspace.html`);
   await ws.waitForSelector('#boot.done', { state: 'attached' });
-  const run = (cmd) => ws.evaluate((c) => window.ctmux.t.runString(c), cmd);
-  const key = async (...keys) => { for (const k of keys) { await ws.keyboard.press(k); await pause(120); } };
+  const run = (cmd: string) => ws.evaluate((c) => window.ctmux.t.runString(c), cmd);
+  const key = async (...keys: string[]) => { for (const k of keys) { await ws.keyboard.press(k); await pause(120); } };
 
   // Sessions: "dev" (shown) plus two others for the session manager.
   await run('rename-session dev');

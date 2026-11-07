@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Generates icons/icon{16,32,48,128}.png: a dark terminal tile split into
 // panes with a green tmux status line. No dependencies (zlib + hand-rolled PNG).
 
@@ -14,12 +13,15 @@ const CRC = new Uint32Array(256).map((_, n) => {
   for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
   return c >>> 0;
 });
-const crc32 = (buf) => {
+type Rgb = number[];
+type PixelFn = (x: number, y: number, s: number) => number[];
+
+const crc32 = (buf: Uint8Array) => {
   let c = 0xffffffff;
   for (const b of buf) c = CRC[(c ^ b) & 0xff] ^ (c >>> 8);
   return (c ^ 0xffffffff) >>> 0;
 };
-const chunk = (type, data) => {
+const chunk = (type: string, data: Buffer) => {
   const len = Buffer.alloc(4);
   len.writeUInt32BE(data.length);
   const td = Buffer.concat([Buffer.from(type), data]);
@@ -28,7 +30,7 @@ const chunk = (type, data) => {
   return Buffer.concat([len, td, crc]);
 };
 
-function png(size, pixel) {
+function png(size: number, pixel: PixelFn) {
   const raw = Buffer.alloc((size * 4 + 1) * size);
   for (let y = 0; y < size; y++) {
     raw[y * (size * 4 + 1)] = 0;
@@ -48,12 +50,12 @@ function png(size, pixel) {
   ]);
 }
 
-const BG = [24, 24, 27];
-const PANE = [40, 42, 54];
-const GREEN = [80, 250, 123];
-const BORDER = [98, 114, 164];
+const BG: Rgb = [24, 24, 27];
+const PANE: Rgb = [40, 42, 54];
+const GREEN: Rgb = [80, 250, 123];
+const BORDER: Rgb = [98, 114, 164];
 
-function pixel(x, y, s) {
+function pixel(x: number, y: number, s: number): number[] {
   const u = x / s, v = y / s;
   // Rounded-square mask.
   const r = 0.18, cx = Math.min(Math.max(u, r), 1 - r), cy = Math.min(Math.max(v, r), 1 - r);
