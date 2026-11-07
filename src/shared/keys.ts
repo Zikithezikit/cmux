@@ -15,7 +15,7 @@
   };
   for (let i = 1; i <= 12; i++) NAMED['F' + i] = 'F' + i;
 
-  const ALIASES: Record<string, string> = {
+  const ALIASES: Readonly<Record<string, string>> = {
     enter: 'Enter', escape: 'Escape', esc: 'Escape', space: 'Space', tab: 'Tab',
     btab: 'BTab', bspace: 'BSpace', backspace: 'BSpace', up: 'Up', down: 'Down',
     left: 'Left', right: 'Right', home: 'Home', end: 'End', ic: 'IC', insert: 'IC',
@@ -23,14 +23,14 @@
     npage: 'NPage', pagedown: 'NPage', pgdn: 'NPage', none: 'None',
   };
 
-  const MODIFIER_ONLY = new Set([
+  const MODIFIER_ONLY: ReadonlySet<string> = new Set([
     'Shift', 'Control', 'Alt', 'Meta', 'AltGraph', 'CapsLock', 'NumLock',
     'ScrollLock', 'Dead', 'Unidentified', 'OS', 'Hyper', 'Super', 'Fn', 'Process',
   ]);
 
   /** Canonicalise a tmux key string. Returns null for empty / "None". */
-  function normalizeKey(str: unknown): string | null {
-    let s = String(str == null ? '' : str).trim();
+  function normalizeKey(str: string | null | undefined): string | null {
+    let s = String(str ?? '').trim();
     if (!s) return null;
     let ctrl = false, meta = false, shift = false;
     for (;;) {
@@ -40,7 +40,7 @@
         s = s.slice(2);
         continue;
       }
-      if (s.length === 2 && s[0] === '^') { ctrl = true; s = s.slice(1); continue; }
+      if (s.length === 2 && s.startsWith('^')) { ctrl = true; s = s.slice(1); continue; }
       break;
     }
     let base: string;
@@ -92,7 +92,7 @@
    * { table, key, prefix? } describing what the workspace should execute.
    */
   function createRouter(getConfig: () => CtmuxRouterConfig | null | undefined, now?: () => number): CtmuxKeyRouter {
-    now = now || Date.now;
+    const clock = now || Date.now;
     let table = 'root';
     let repeatUntil = 0;
 
@@ -109,22 +109,23 @@
           repeatUntil = 0;
           return { table: 'root', key, prefix: true };
         }
-        if (tables.root && tables.root.indexOf(key) !== -1) return { table: 'root', key };
+        if (tables.root?.includes(key)) return { table: 'root', key };
         return null;
       }
 
       const t = table;
+      const repeatTime = cfg.repeatTime || 0;
       if (repeatUntil) {
-        if (now!() <= repeatUntil && repeat[t] && repeat[t].indexOf(key) !== -1) {
-          repeatUntil = now!() + (cfg.repeatTime || 0);
+        if (clock() <= repeatUntil && repeat[t]?.includes(key)) {
+          repeatUntil = clock() + repeatTime;
           return { table: t, key };
         }
         table = 'root';
         repeatUntil = 0;
         return feed(key);
       }
-      if (repeat[t] && repeat[t].indexOf(key) !== -1 && cfg.repeatTime! > 0) {
-        repeatUntil = now!() + cfg.repeatTime!;
+      if (repeat[t]?.includes(key) && repeatTime > 0) {
+        repeatUntil = clock() + repeatTime;
       } else {
         table = 'root';
       }
@@ -144,13 +145,13 @@
 
 /** Tables the key router consults (a subset of the workspace runtime config). */
 interface CtmuxRouterConfig {
-  prefix?: string | null;
-  prefix2?: string | null;
+  readonly prefix?: string | null;
+  readonly prefix2?: string | null;
   /** Bound keys per table name. */
-  tables?: Record<string, string[]>;
+  readonly tables?: Readonly<Record<string, readonly string[]>>;
   /** Repeatable keys per table name. */
-  repeat?: Record<string, string[]>;
-  repeatTime?: number;
+  readonly repeat?: Readonly<Record<string, readonly string[]>>;
+  readonly repeatTime?: number;
 }
 
 /** What the workspace should execute for a routed key. */
@@ -171,9 +172,11 @@ interface CtmuxKeyRouter {
 }
 
 interface CtmuxKeysApi {
-  normalizeKey(str: unknown): string | null;
+  normalizeKey(str: string | null | undefined): string | null;
   eventToKey(e: CtmuxKeyEvent): string | null;
   createRouter(getConfig: () => CtmuxRouterConfig | null | undefined, now?: () => number): CtmuxKeyRouter;
 }
 
+// Only a global `var` adds a property to globalThis in a classic script; it is read as globalThis.CtmuxKeys.
+// eslint-disable-next-line no-var, @typescript-eslint/no-unused-vars
 declare var CtmuxKeys: CtmuxKeysApi;
