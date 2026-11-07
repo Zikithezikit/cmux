@@ -10,7 +10,7 @@ import { paneShortName } from './server.js';
 import type { Tmux, KeyBinding, PasteBuffer, WaitChannel } from './tmux.js';
 import type { Arg, CommandList } from './parser.js';
 import type { TargetKind } from './target.js';
-import type { CommandContext, Flags, Geometry, LayoutNode, LayoutRects, Session, Target, Window } from './types.js';
+import type { CommandContext, Flags, Geometry, LayoutRects, MenuItem as UiMenuItem, PopupOptions, Session, Target, Window } from './types.js';
 
 /** A positional command argument: a plain word or a `{ ... }` block. */
 export type CommandArg = Arg;
@@ -29,11 +29,8 @@ export interface CommandDef {
   run(t: Tmux, f: Flags, a: CommandArg[], ctx: CommandContext): unknown;
 }
 
-export interface MenuItem {
-  separator?: boolean;
-  label?: string;
-  key?: string;
-  disabled?: boolean;
+/** A display-menu item: its command is already a command string. */
+export interface MenuItem extends UiMenuItem {
   command?: string;
 }
 
@@ -43,20 +40,28 @@ type RunFn = (t: Tmux, f: Flags, a: CommandArg[], ctx: CommandContext) => unknow
 export const COMMANDS = new Map<string, CommandDef>();
 const ALIASES = new Map<string, string>();
 
-export function registerCommand(def: CommandDef) {
+export function registerCommand(def: CommandDef): void {
   COMMANDS.set(def.name, def);
-  for (const a of ([] as string[]).concat(def.alias || [])) ALIASES.set(a, def.name);
+  for (const a of [def.alias || []].flat()) ALIASES.set(a, def.name);
 }
 
-export function resolveCommand(name: string) {
+export function resolveCommand(name: string): CommandDef | null | undefined {
   if (COMMANDS.has(name)) return COMMANDS.get(name);
-  if (ALIASES.has(name)) return COMMANDS.get(ALIASES.get(name)!);
+  const alias = ALIASES.get(name);
+  if (alias !== undefined) return COMMANDS.get(alias);
   // tmux accepts unambiguous prefixes of command names.
   const matches = [...COMMANDS.keys()].filter((n) => n.startsWith(name));
   return matches.length === 1 ? COMMANDS.get(matches[0]) : null;
 }
 
-const def = (name: string, alias: string | string[] | null, flags: string, run: RunFn) => registerCommand({ name, alias, flags, run });
+const def = (name: string, alias: string | string[] | null, flags: string, run: RunFn): void => registerCommand({ name, alias, flags, run });
+
+/** A registered built-in command (used to delegate, e.g. select-window -l -> last-window). */
+function builtin(name: string): CommandDef {
+  const c = COMMANDS.get(name);
+  if (!c) throw new Error(`unknown command: ${name}`);
+  return c;
+}
 
 // ------------------------------------------------------------------ helpers
 
@@ -68,11 +73,20 @@ function target(t: Tmux, spec: string | true | undefined, kind: TargetKind, ctx:
 
 const truthyFmt = (v: string) => v !== '' && v !== '0';
 
+/** The value of a value-taking flag (`-F fmt`); value flags are always strings once set. */
+const str = (v: string | true | undefined): string | undefined => (typeof v === 'string' ? v : undefined);
+
+/** The message of a caught error (or the thrown value itself), as `${err.message || err}`. */
+function errorText(err: unknown): string {
+  if (typeof err === 'object' && err !== null && 'message' in err && typeof err.message === 'string' && err.message) return err.message;
+  return String(err);
+}
+
 const isFlag = (v: unknown) => ['on', 'yes', '1', 'true'].includes(String(v).toLowerCase());
 
 /** Interpret what would be a shell command / start directory as something to open. */
-export function toUrl(input: unknown, searchUrl: string = DEFAULT_OPTIONS['@ctmux-search-url']) {
-  const s = String(input || '').trim();
+export function toUrl(input: string | null | undefined, searchUrl: string = DEFAULT_OPTIONS['@ctmux-search-url']): string {
+  const s = (input || '').trim();
   if (!s) return '';
   if (/^javascript:/i.test(s)) return '';
   if (/^(https?|file|ftp|data|about|chrome-extension|view-source):/i.test(s)) return s;
@@ -97,7 +111,7 @@ function paneSpec(t: Tmux, cmd: string, startDir: string | true | undefined, ctx
   const dc = t.getOption('default-command');
   if (dc && looksLikeUrl(dc)) return { url: toUrl(dc, search) };
   if (startDir) {
-    const dir = t.expandPlain(startDir as string, ctx);
+    const dir = t.expandPlain(startDir, ctx);
     return { prefill: dir };
   }
   return {};
@@ -121,7 +135,7 @@ function selectPane(t: Tmux, session: Session, window: Window, paneId: number) {
   t.server.switchTo(session);
   t.server.selectWindow(session, window);
   t.server.selectPane(window, paneId);
-  t.ui.focusPane?.(paneId);
+  t.ui.focusPane(paneId);
 }
 
 function templateReplace(template: string, value: string, idx: number) {
@@ -143,7 +157,8 @@ function asCommandString(a: CommandArg[]) {
 // ------------------------------------------------------------- options
 
 function setOptionCmd(t: Tmux, f: Flags, a: CommandArg[], ctx: CommandContext) {
-  let [name, value] = a.map((x) => argToString(x));
+  const [name, initialValue] = a.map((x) => argToString(x));
+  let value = initialValue;
   if (!name) throw new Error('missing option name');
   const origin = ctx.origin || 'user';
 
@@ -161,7 +176,7 @@ function setOptionCmd(t: Tmux, f: Flags, a: CommandArg[], ctx: CommandContext) {
   if (arr && arr[1] in ARRAY_OPTIONS) return setArrayOption(t, f, arr[1], arr[2], value, origin);
   // message-command-fg etc. map onto *-style too.
   if (f.u || f.U) {
-    if (name in DEFAULT_OPTIONS) t.setOption(name, (DEFAULT_OPTIONS as Record<string, string>)[name], 'default');
+    if (name in DEFAULT_OPTIONS) t.setOption(name, DEFAULT_OPTIONS[name], 'default');
     else delete t.options[name];
     return;
   }
@@ -171,7 +186,7 @@ function setOptionCmd(t: Tmux, f: Flags, a: CommandArg[], ctx: CommandContext) {
   if (f.o && name in t.options && t.optionOrigins[name] === 'user') return;
   if (value === undefined) {
     if (FLAG_OPTIONS.has(name)) value = t.getOption(name) === 'on' ? 'off' : 'on';
-    else if (name[0] !== '@') throw new Error(`${name}: missing value`);
+    else if (!name.startsWith('@')) throw new Error(`${name}: missing value`);
     else value = '';
   }
   if (FLAG_OPTIONS.has(name)) value = isFlag(value) ? 'on' : value === 'toggle' ? (t.getOption(name) === 'on' ? 'off' : 'on') : 'off';
@@ -179,7 +194,7 @@ function setOptionCmd(t: Tmux, f: Flags, a: CommandArg[], ctx: CommandContext) {
   if (f.a) value = t.getOption(name) + value;
   t.setOption(name, value, origin);
   if (name === '@plugin' || name === '@tpm_plugins') t.plugins?.declare(value, ctx, name === '@tpm_plugins');
-  t.ui.optionChanged?.(name);
+  t.ui.optionChanged(name);
 }
 
 function setArrayOption(t: Tmux, f: Flags, base: string, index: string | undefined, value: string | undefined, origin: string) {
@@ -197,13 +212,13 @@ function setArrayOption(t: Tmux, f: Flags, base: string, index: string | undefin
     if (f.o && k in t.options) return;
     t.setOption(k, f.a ? (t.options[k] ?? '') + value : value, origin);
   } else {
-    const sep = (ARRAY_OPTIONS as Record<string, string | null>)[base];
+    const sep = ARRAY_OPTIONS[base];
     const items = sep == null ? [value] : value.split(sep === ' ' ? /\s+/ : sep).filter((x) => x !== '');
     if (!f.a) keys().forEach((k) => delete t.options[k]);
     let next = t.arrayOption(base).reduce((m, [i]) => Math.max(m, i + 1), 0);
     for (const item of items) t.setOption(`${base}[${next++}]`, item, origin);
   }
-  t.ui.optionChanged?.(base);
+  t.ui.optionChanged(base);
 }
 
 def('set-option', 'set', 'aFgopqst:uUw', setOptionCmd);
@@ -219,7 +234,7 @@ def('show-options', ['show', 'show-window-options', 'showw'], 'AgHpqst:vw', (t, 
     if (!names.length && !f.q) throw new Error(`invalid option: ${want}`);
   }
   const lines = names.map((n) => (f.v ? t.options[n] : `${n} ${quoteArg(t.options[n])}`));
-  if (ctx.print) { lines.forEach((l) => ctx.print!(l)); return; }
+  if (ctx.print) { for (const l of lines) ctx.print(l); return; }
   if (want != null) { if (lines.length) t.ui.message(lines.join(' ')); return; }
   t.ui.showList({ title: 'show-options', lines });
 });
@@ -241,16 +256,19 @@ def('show-environment', 'showenv', 'hgst:', (t, f, a, ctx) => {
 def('set-hook', null, 'agpRt:uw', async (t, f, a, ctx) => {
   const [rawName, ...rest] = a;
   if (rawName == null) throw new Error('missing hook name');
-  const m = /^(.+?)(?:\[(\d+)\])?$/.exec(argToString(rawName))!;
+  const m = /^(.+?)(?:\[(\d+)\])?$/.exec(argToString(rawName));
+  if (!m) throw new Error('invalid hook: ');
   const name = m[1];
   const index = m[2] != null ? Number(m[2]) : null;
-  if (!/^after-/.test(name) && !EVENT_HOOK_NAMES.has(name)) {
+  if (!name.startsWith('after-') && !EVENT_HOOK_NAMES.has(name)) {
     if (!KNOWN_UNFIRED_HOOKS.has(name)) throw new Error(`invalid hook: ${name}`);
     t.notice(`set-hook ${name}: this event never happens in the browser, so the hook won't run`, { source: ctx.source, line: ctx.line, level: 'info', key: 'hook:' + name });
   }
   if (f.R) { await t.fireHook(name, ctx); return; }
   const list = (t.hooks[name] ||= []);
   if (f.u) {
+    // Leave a hole (not `undefined`) so the array length, and so later -a indexes, are unchanged.
+    // eslint-disable-next-line @typescript-eslint/no-array-delete
     if (index != null) delete list[index];
     else delete t.hooks[name];
     return;
@@ -278,27 +296,28 @@ def('bind-key', 'bind', 'nrN:T:', (t, f, a, ctx) => {
   const [key, ...cmd] = a;
   if (key == null) throw new Error('missing key');
   if (!cmd.length) throw new Error('missing command');
-  const table = f.n ? 'root' : (f.T as string) || 'prefix';
+  const table = f.n ? 'root' : str(f.T) || 'prefix';
   const keyStr = argToString(key);
   if (/^(Mouse|Wheel|Double|Triple|SecondClick)/.test(keyStr)) {
     t.notice(`mouse binding ${keyStr} in ${table}: mouse handling is native in the browser`, { source: ctx.source, line: ctx.line, level: 'info', key: 'mouse-bind' });
   }
   const commands = toCommandList(cmd.length === 1 ? cmd[0] : cmd, t.env);
-  const k = t.bind(table, keyStr, commands, { repeat: !!f.r, note: (f.N as string) || '', origin: ctx.origin || 'user' });
+  const k = t.bind(table, keyStr, commands, { repeat: !!f.r, note: str(f.N) || '', origin: ctx.origin || 'user' });
   if (!k) throw new Error(`unknown key: ${keyStr}`);
-  t.ui.keysChanged?.();
+  t.ui.keysChanged();
 });
 
 def('unbind-key', 'unbind', 'anqT:', (t, f, a) => {
-  const table = f.n ? 'root' : (f.T as string) || 'prefix';
+  const table = f.n ? 'root' : str(f.T) || 'prefix';
   if (f.a) t.table(table).clear();
   else if (a.length) t.unbind(table, argToString(a[0]));
-  t.ui.keysChanged?.();
+  t.ui.keysChanged();
 });
 
 def('list-keys', 'lsk', '1aNP:T:', (t, f, a, ctx) => {
   const lines: string[] = [];
-  const tables = f.T ? [f.T as string] : [...t.tables.keys()].sort((x, y) => (x === 'prefix' ? -1 : y === 'prefix' ? 1 : x.localeCompare(y)));
+  const keyTable = str(f.T);
+  const tables = keyTable ? [keyTable] : [...t.tables.keys()].sort((x, y) => (x === 'prefix' ? -1 : y === 'prefix' ? 1 : x.localeCompare(y)));
   const prefix = t.getOption('prefix');
   for (const name of tables) {
     const map = t.tables.get(name);
@@ -314,18 +333,20 @@ def('list-keys', 'lsk', '1aNP:T:', (t, f, a, ctx) => {
       }
     }
   }
-  if (ctx.print) { lines.forEach((l) => ctx.print!(l)); return; }
+  if (ctx.print) { for (const l of lines) ctx.print(l); return; }
   t.ui.showList({ title: f.N ? 'Key bindings' : 'list-keys', lines, filterable: true });
 });
 
 def('switch-client', 'switchc', 'cEFlnpt:rT:Z', (t, f, a, ctx) => {
-  if (f.T) { t.keyTable = f.T as string; t.ui.setKeyTable?.(f.T as string); return; }
+  const keyTable = str(f.T);
+  if (keyTable) { t.keyTable = keyTable; t.ui.setKeyTable(keyTable); return; }
   const srv = t.server;
   const list = srv.sessions.slice().sort((x, y) => x.name.localeCompare(y.name, undefined, { numeric: true }));
   let s: Session | null | undefined;
   if (f.l) s = srv.sessionById(srv.lastSessionId);
   else if (f.n || f.p) {
-    const i = list.indexOf(srv.session as Session);
+    const cur = srv.session;
+    const i = cur ? list.indexOf(cur) : -1;
     s = list[(i + (f.n ? 1 : -1) + list.length) % list.length];
   } else if (f.t) {
     const r = target(t, f.t, 'session', ctx);
@@ -335,7 +356,7 @@ def('switch-client', 'switchc', 'cEFlnpt:rT:Z', (t, f, a, ctx) => {
   }
   if (!s) { if (f.l) t.ui.message('no last session'); return; }
   srv.switchTo(s);
-  t.ui.focusPane?.();
+  t.ui.focusPane();
 });
 
 // ---------------------------------------------------------- config / shell
@@ -348,12 +369,12 @@ def('source-file', 'source', 'Fnqv', async (t, f, a, ctx) => {
     try {
       text = await t.loadFile(path);
     } catch (err) {
-      if (!f.q) throw new Error(`${path}: ${(err as Error).message || err}`);
+      if (!f.q) throw new Error(`${path}: ${errorText(err)}`, { cause: err });
       continue;
     }
     if (f.n) continue; // parse only
     await t.runConfig(text, { source: path, origin: 'user', depth: (ctx.depth || 0) + 1 });
-    if (!ctx.fromConfig) t.ui.configReloaded?.(path);
+    if (!ctx.fromConfig) t.ui.configReloaded(path);
   }
 });
 
@@ -371,7 +392,7 @@ def('run-shell', 'run', 'bCd:t:Es:c:', async (t, f, a, ctx) => {
   }
   const out = r.out.replace(/\n$/, '');
   if (out) {
-    if (ctx.print) out.split('\n').forEach((l) => ctx.print!(l));
+    if (ctx.print) { for (const l of out.split('\n')) ctx.print(l); }
     else if (ctx.fromConfig) t.log(`run-shell: ${out}`);
     else if (!f.b) t.ui.showList({ title: 'run-shell', lines: out.split('\n') });
   }
@@ -412,10 +433,11 @@ def('new-window', 'neww', 'abc:de:F:kn:Pt:S', (t, f, a, ctx) => {
     const spec = String(f.t);
     const m = /^(?:([^:]*):)?=?(\d+)$/.exec(spec);
     if (m) {
-      session = m[1] ? target(t, m[1], 'session', ctx).session : session;
+      // With no current session, create it now (as below) so the index can be checked against it.
+      session = m[1] ? target(t, m[1], 'session', ctx).session : session ?? srv.newSession({});
       index = Number(m[2]);
-      const existing = session!.windows.find((w) => w.index === index);
-      if (existing && f.k) srv.killWindow(session!, existing);
+      const existing = session.windows.find((w) => w.index === index);
+      if (existing && f.k) srv.killWindow(session, existing);
       else if (existing && !f.a && !f.b) throw new Error(`index ${index} in use`);
     } else {
       session = target(t, spec, 'session', ctx).session;
@@ -423,22 +445,22 @@ def('new-window', 'neww', 'abc:de:F:kn:Pt:S', (t, f, a, ctx) => {
   }
   if (!session) session = srv.newSession({});
   const spec = paneSpec(t, a.length ? asCommandString(a) : '', f.c, ctx);
-  const w = srv.newWindow(session, { ...spec, name: f.n as string | undefined, index, after: !!f.a, select: !f.d });
+  const w = srv.newWindow(session, { ...spec, name: str(f.n), index, after: !!f.a, select: !f.d });
   if (!f.d) srv.switchTo(session);
-  if (f.P) t.ui.message(t.expandPlain((f.F as string) || '#{session_name}:#{window_index}.#{pane_index}', { session, window: w }));
-  if (!f.d) t.ui.focusPane?.(w.active);
+  if (f.P) t.ui.message(t.expandPlain(str(f.F) || '#{session_name}:#{window_index}.#{pane_index}', { session, window: w }));
+  if (!f.d) t.ui.focusPane(w.active);
 });
 
 def('select-window', 'selectw', 'lnpTt:', (t, f, a, ctx) => {
   const srv = t.server;
-  if (f.l) return COMMANDS.get('last-window')!.run(t, {}, [], ctx);
-  if (f.n) return COMMANDS.get('next-window')!.run(t, {}, [], ctx);
-  if (f.p) return COMMANDS.get('previous-window')!.run(t, {}, [], ctx);
+  if (f.l) return builtin('last-window').run(t, {}, [], ctx);
+  if (f.n) return builtin('next-window').run(t, {}, [], ctx);
+  if (f.p) return builtin('previous-window').run(t, {}, [], ctx);
   const r = target(t, f.t, 'window', ctx);
-  if (f.T && r.window.id === r.session.active) return COMMANDS.get('last-window')!.run(t, {}, [], ctx);
+  if (f.T && r.window.id === r.session.active) return builtin('last-window').run(t, {}, [], ctx);
   srv.switchTo(r.session);
   srv.selectWindow(r.session, r.window);
-  t.ui.focusPane?.();
+  t.ui.focusPane();
   return undefined;
 });
 
@@ -450,7 +472,7 @@ function cycleWindow(t: Tmux, delta: number) {
   if (sorted.length < 2) return;
   const i = sorted.findIndex((w) => w.id === s.active);
   srv.selectWindow(s, sorted[(i + delta + sorted.length) % sorted.length]);
-  t.ui.focusPane?.();
+  t.ui.focusPane();
 }
 
 def('next-window', 'next', 'at:', (t, f) => { if (f.a) { t.ui.message('No next window with alert'); return; } cycleWindow(t, 1); });
@@ -458,10 +480,10 @@ def('previous-window', 'prev', 'at:', (t, f) => { if (f.a) { t.ui.message('No pr
 
 def('last-window', 'last', 't:', (t) => {
   const s: Session | null = t.server.session;
-  const w = s && s.windows.find((x) => x.id === s.last);
-  if (!w) { t.ui.message('No last window'); return; }
+  const w = s?.windows.find((x) => x.id === s.last);
+  if (!s || !w) { t.ui.message('No last window'); return; }
   t.server.selectWindow(s, w);
-  t.ui.focusPane?.();
+  t.ui.focusPane();
 });
 
 def('rename-window', 'renamew', 't:', (t, f, a, ctx) => {
@@ -477,8 +499,8 @@ def('kill-window', 'killw', 'at:', (t, f, a, ctx) => {
   } else {
     t.server.killWindow(r.session, r.window);
   }
-  t.ui.serverEmpty?.();
-  t.ui.focusPane?.();
+  t.ui.serverEmpty();
+  t.ui.focusPane();
 });
 
 def('swap-window', 'swapw', 'ds:t:', (t, f, a, ctx) => {
@@ -512,7 +534,7 @@ def('rotate-window', 'rotatew', 'DUt:Z', (t, f, a, ctx) => {
   r.window.layout = L.rotate(r.window.layout, !!f.U);
 });
 
-const layoutMain = (t: Tmux, window: Window) => {
+const layoutMain = (t: Tmux) => {
   const g = t.ui.geometry();
   const frac = (opt: string, total: number, cell: number) => {
     const v = String(t.getOption(opt));
@@ -525,11 +547,11 @@ const layoutMain = (t: Tmux, window: Window) => {
 
 function applyLayout(t: Tmux, window: Window, name: string) {
   const ids = L.panesInOrder(window.layout);
-  const main = layoutMain(t, window);
+  const main = layoutMain(t);
   const tree = L.presetLayout(name, ids, name.startsWith('main-horizontal') ? main.h : main.v);
   if (!tree) throw new Error(`unknown layout: ${name}`);
   window.prevLayout = window.layout;
-  window.layout = tree as LayoutNode;
+  window.layout = tree;
   window.layoutName = name;
   window.zoomed = false;
 }
@@ -540,7 +562,7 @@ def('select-layout', 'selectl', 'Enopt:', (t, f, a, ctx) => {
   if (f.o) { if (w.prevLayout) [w.layout, w.prevLayout] = [w.prevLayout, w.layout]; return; }
   if (f.E) { w.prevLayout = w.layout; w.layout = L.spread(w.layout); return; }
   if (f.n || f.p) {
-    const i = L.LAYOUTS.indexOf(w.layoutName as string);
+    const i = w.layoutName == null ? -1 : L.LAYOUTS.indexOf(w.layoutName);
     const n = L.LAYOUTS.length;
     return applyLayout(t, w, L.LAYOUTS[(i + (f.n ? 1 : n - 1) + (i === -1 && f.p ? 1 : 0)) % n]);
   }
@@ -554,13 +576,13 @@ def('select-layout', 'selectl', 'Enopt:', (t, f, a, ctx) => {
 
 def('next-layout', 'nextl', 't:', (t, f, a, ctx) => {
   const w = target(t, f.t, 'window', ctx).window;
-  const i = L.LAYOUTS.indexOf(w.layoutName as string);
+  const i = w.layoutName == null ? -1 : L.LAYOUTS.indexOf(w.layoutName);
   applyLayout(t, w, L.LAYOUTS[(i + 1) % L.LAYOUTS.length]);
 });
 
 def('previous-layout', 'prevl', 't:', (t, f, a, ctx) => {
   const w = target(t, f.t, 'window', ctx).window;
-  const i = L.LAYOUTS.indexOf(w.layoutName as string);
+  const i = w.layoutName == null ? -1 : L.LAYOUTS.indexOf(w.layoutName);
   applyLayout(t, w, L.LAYOUTS[(i - 1 + L.LAYOUTS.length * 2) % L.LAYOUTS.length]);
 });
 
@@ -597,24 +619,25 @@ def('split-window', 'splitw', 'bc:de:fF:hIl:p:Pt:vZ', (t, f, a, ctx) => {
   const size = f.p != null ? Number(f.p) / 100 : sizeFraction(t, f.l, total, cell);
   const spec = paneSpec(t, a.length ? asCommandString(a) : '', f.c, { ...ctx, pane: r.pane, window: r.window, session: r.session });
   const p = t.server.splitPane(r.window, r.pane, dir, { ...spec, before: !!f.b, full: !!f.f, size: size ?? undefined, select: !f.d });
-  if (f.P) t.ui.message(t.expandPlain((f.F as string) || '#{session_name}:#{window_index}.#{pane_index}', { session: r.session, window: r.window, pane: p.id }));
-  if (!f.d) t.ui.focusPane?.(p.id);
+  if (f.P) t.ui.message(t.expandPlain(str(f.F) || '#{session_name}:#{window_index}.#{pane_index}', { session: r.session, window: r.window, pane: p.id }));
+  if (!f.d) t.ui.focusPane(p.id);
 });
 
 def('select-pane', 'selectp', 'DdegLlMmP:RT:t:UZ', (t, f, a, ctx) => {
   const srv = t.server;
-  if (f.l) return COMMANDS.get('last-pane')!.run(t, f, a, ctx);
+  if (f.l) return builtin('last-pane').run(t, f, a, ctx);
   const r = target(t, f.t, 'pane', ctx);
-  if (f.T != null) {
+  const title = str(f.T);
+  if (title != null) {
     const p = srv.panes[r.pane];
-    p.title = f.T as string;
+    p.title = title;
     p.manualTitle = true;
     return;
   }
-  if (f.M) { srv.marked = null; t.ui.render?.(); return; }
+  if (f.M) { srv.marked = null; t.ui.render(); return; }
   if (f.m) {
     srv.marked = srv.markedPane() === r.pane ? null : r.pane;
-    t.ui.render?.();
+    t.ui.render();
     return;
   }
   if (f.e || f.d || f.P || f.g) return; // input / style: not applicable
@@ -648,8 +671,8 @@ def('kill-pane', 'killp', 'at:', (t, f, a, ctx) => {
   } else {
     t.server.killPane(r.pane);
   }
-  t.ui.serverEmpty?.();
-  t.ui.focusPane?.();
+  t.ui.serverEmpty();
+  t.ui.focusPane();
 });
 
 def('resize-pane', 'resizep', 'DLMRTt:Ux:y:Z', (t, f, a, ctx) => {
@@ -703,7 +726,7 @@ def('swap-pane', 'swapp', 'dDs:t:UZ', (t, f, a, ctx) => {
     if (src.window.active === src.pane) src.window.active = dst.pane;
     if (w.active === dst.pane) w.active = src.pane;
   }
-  if (!f.d && (f.U || f.D)) t.ui.focusPane?.(w.active);
+  if (!f.d && (f.U || f.D)) t.ui.focusPane(w.active);
 });
 
 def('break-pane', 'breakp', 'abdPF:n:s:t:', (t, f, a, ctx) => {
@@ -713,8 +736,8 @@ def('break-pane', 'breakp', 'abdPF:n:s:t:', (t, f, a, ctx) => {
     const m = /(\d+)$/.exec(String(f.t));
     if (m) index = Number(m[1]);
   }
-  const w = t.server.breakPane(r.pane, { name: f.n as string | undefined, select: !f.d, index, after: !!f.a });
-  if (w && !f.d) t.ui.focusPane?.(r.pane);
+  const w = t.server.breakPane(r.pane, { name: str(f.n), select: !f.d, index, after: !!f.a });
+  if (w && !f.d) t.ui.focusPane(r.pane);
 });
 
 def('join-pane', ['joinp', 'move-pane', 'movep'], 'bdfhvl:p:s:t:', (t, f, a, ctx) => {
@@ -724,7 +747,7 @@ def('join-pane', ['joinp', 'move-pane', 'movep'], 'bdfhvl:p:s:t:', (t, f, a, ctx
   if (src.window === dst.window) throw new Error('source and target are in the same window');
   const size = f.p != null ? Number(f.p) / 100 : (f.l && String(f.l).endsWith('%') ? Number(String(f.l).slice(0, -1)) / 100 : undefined);
   t.server.joinPane(src.pane, dst.window, dst.pane, f.h ? 'h' : 'v', { before: !!f.b, full: !!f.f, size, select: !f.d });
-  if (!f.d) { t.server.switchTo(dst.session); t.server.selectWindow(dst.session, dst.window); t.ui.focusPane?.(src.pane); }
+  if (!f.d) { t.server.switchTo(dst.session); t.server.selectWindow(dst.session, dst.window); t.ui.focusPane(src.pane); }
 });
 
 def('display-panes', 'displayp', 'bd:Nt:', async (t, f, a, ctx) => {
@@ -739,14 +762,14 @@ def('respawn-pane', 'respawnp', 'c:e:kt:', (t, f, a, ctx) => {
   const r = target(t, f.t, 'pane', ctx);
   const p = t.server.panes[r.pane];
   if (a.length) return navigate(t, r.pane, asCommandString(a));
-  if (p.kind === 'web') t.ui.paneCommand?.(r.pane, { type: 'nav', action: 'reload' });
-  else t.ui.renderPane?.(r.pane);
+  if (p.kind === 'web') void t.ui.paneCommand(r.pane, { type: 'nav', action: 'reload' });
+  else t.ui.renderPane(r.pane);
 });
 
 def('respawn-window', 'respawnw', 'c:e:kt:', (t, f, a, ctx) => {
   const r = target(t, f.t, 'window', ctx);
   for (const id of L.panesInOrder(r.window.layout)) {
-    if (t.server.panes[id].kind === 'web') t.ui.paneCommand?.(id, { type: 'nav', action: 'reload' });
+    if (t.server.panes[id].kind === 'web') void t.ui.paneCommand(id, { type: 'nav', action: 'reload' });
   }
 });
 
@@ -756,16 +779,18 @@ def('clear-history', 'clearhist', 'Ht:', () => {});
 
 def('new-session', 'new', 'Ac:dDEF:f:n:Ps:t:x:Xy:', (t, f, a, ctx) => {
   const srv = t.server;
-  if (f.s && srv.sessionByName(f.s as string)) {
-    if (f.A) { srv.switchTo(srv.sessionByName(f.s as string)!); t.ui.focusPane?.(); return; }
-    throw new Error(`duplicate session: ${f.s}`);
+  const name = str(f.s);
+  const existing = name ? srv.sessionByName(name) : null;
+  if (existing) {
+    if (f.A) { srv.switchTo(existing); t.ui.focusPane(); return; }
+    throw new Error(`duplicate session: ${name}`);
   }
   const spec = paneSpec(t, a.length ? asCommandString(a) : '', f.c, ctx);
   const prev = srv.session;
-  const s = srv.newSession({ name: f.s as string, windowName: f.n as string, ...spec });
+  const s = srv.newSession({ name, windowName: str(f.n), ...spec });
   if (f.d && prev) srv.switchTo(prev);
-  if (f.P) t.ui.message(t.expandPlain((f.F as string) || '#{session_name}:', { session: s }));
-  t.ui.focusPane?.();
+  if (f.P) t.ui.message(t.expandPlain(str(f.F) || '#{session_name}:', { session: s }));
+  t.ui.focusPane();
 });
 
 def('rename-session', 'rename', 't:', (t, f, a, ctx) => {
@@ -781,30 +806,30 @@ def('kill-session', null, 'aCt:', (t, f, a, ctx) => {
   if (f.C) return;
   if (f.a) { for (const s of t.server.sessions.slice()) if (s !== r.session) t.server.killSession(s); }
   else t.server.killSession(r.session);
-  t.ui.serverEmpty?.();
-  t.ui.focusPane?.();
+  t.ui.serverEmpty();
+  t.ui.focusPane();
 });
 
 def('kill-server', null, '', (t) => {
   for (const s of t.server.sessions.slice()) t.server.killSession(s);
-  t.ui.serverEmpty?.();
+  t.ui.serverEmpty();
 });
 
 def('has-session', 'has', 't:', (t, f, a, ctx) => { target(t, f.t, 'session', ctx); });
 
 def('list-sessions', 'ls', 'F:f:', (t, f, a, ctx) => {
-  const fmt = (f.F as string) || '#{session_name}: #{session_windows} windows (created #{t:session_created})#{?session_attached, (attached),}';
-  const keep = (c: CommandContext) => !f.f || truthyFmt(t.expandPlain(f.f as string, c));
+  const fmt = str(f.F) || '#{session_name}: #{session_windows} windows (created #{t:session_created})#{?session_attached, (attached),}';
+  const keep = (c: CommandContext) => !f.f || truthyFmt(t.expandPlain(f.f, c));
   t.output(ctx, t.server.sessions.filter((s) => keep({ session: s })).map((s) => t.expandPlain(fmt, { session: s })), 'list-sessions');
 });
 
 def('list-windows', 'lsw', 'aF:f:t:', (t, f, a, ctx) => {
   const sessions = f.a ? t.server.sessions : [target(t, f.t, 'session', ctx).session];
-  const fmt = (f.F as string) || (f.a ? '#{session_name}:' : '') + '#{window_index}: #{window_name}#{window_flags} (#{window_panes} panes)';
+  const fmt = str(f.F) || (f.a ? '#{session_name}:' : '') + '#{window_index}: #{window_name}#{window_flags} (#{window_panes} panes)';
   const lines: string[] = [];
   for (const s of sessions) {
     for (const w of t.server.sortedWindows(s)) {
-      if (f.f && !truthyFmt(t.expandPlain(f.f as string, { session: s, window: w }))) continue;
+      if (f.f && !truthyFmt(t.expandPlain(f.f, { session: s, window: w }))) continue;
       lines.push(t.expandPlain(fmt, { session: s, window: w }));
     }
   }
@@ -813,14 +838,14 @@ def('list-windows', 'lsw', 'aF:f:t:', (t, f, a, ctx) => {
 
 def('list-panes', 'lsp', 'asF:f:t:', (t, f, a, ctx) => {
   const r = target(t, f.t, 'window', ctx);
-  const fmt = (f.F as string) || '#{pane_index}: #{pane_title} #{pane_current_path}#{?pane_active, (active),}';
+  const fmt = str(f.F) || '#{pane_index}: #{pane_title} #{pane_current_path}#{?pane_active, (active),}';
   const wins: [Session, Window][] = f.a ? t.server.sessions.flatMap((s) => t.server.sortedWindows(s).map((w): [Session, Window] => [s, w]))
     : f.s ? t.server.sortedWindows(r.session).map((w): [Session, Window] => [r.session, w]) : [[r.session, r.window]];
   const lines: string[] = [];
   for (const [session, window] of wins) {
     for (const id of L.panesInOrder(window.layout)) {
       const c = { session, window, pane: id };
-      if (f.f && !truthyFmt(t.expandPlain(f.f as string, c))) continue;
+      if (f.f && !truthyFmt(t.expandPlain(f.f, c))) continue;
       lines.push(t.expandPlain(fmt, c));
     }
   }
@@ -830,15 +855,15 @@ def('list-panes', 'lsp', 'asF:f:t:', (t, f, a, ctx) => {
 def('choose-tree', ['choose-window', 'choose-session'], 'F:f:GK:NO:rst:wyZ', (t, f, a, ctx) => {
   const mode = f.s || ctx.invokedAs === 'choose-session' ? 'session'
     : f.w || ctx.invokedAs === 'choose-window' ? 'window' : 'tree';
-  t.ui.chooseTree({ mode, filter: (f.f as string) || '', zoom: !!f.Z, template: a[0] != null ? argToString(a[0]) : null });
+  t.ui.chooseTree({ mode, filter: str(f.f) || '', zoom: !!f.Z, template: a[0] != null ? argToString(a[0]) : null });
 });
 
 def('choose-client', null, 'F:f:K:NO:rt:yZ', (t) => t.ui.message('Only one client (this tab) is attached'));
 
-def('detach-client', 'detach', 'aE:Ps:t:', (t) => t.ui.detach?.());
+def('detach-client', 'detach', 'aE:Ps:t:', (t) => t.ui.detach());
 def('suspend-client', 'suspendc', 't:', () => {});
-def('lock-server', ['lock', 'lock-client', 'lockc', 'lock-session', 'locks'], 't:', (t) => t.ui.detach?.());
-def('refresh-client', 'refresh', 'A:B:cC:Df:F:l:LRSt:U', (t) => t.ui.refresh?.());
+def('lock-server', ['lock', 'lock-client', 'lockc', 'lock-session', 'locks'], 't:', (t) => t.ui.detach());
+def('refresh-client', 'refresh', 'A:B:cC:Df:F:l:LRSt:U', (t) => t.ui.refresh());
 
 // ------------------------------------------------------- messages / modes
 
@@ -853,7 +878,7 @@ def('display-message', 'display', 'aCc:d:INpt:F:lv', (t, f, a, ctx) => {
     return;
   }
   const fmt = a.length ? argToString(a[0])
-    : (f.F as string) || '[#{session_name}] #{window_index}:#{window_name}, current pane #{pane_index} - (%H:%M %d-%b-%y)';
+    : str(f.F) || '[#{session_name}] #{window_index}:#{window_name}, current pane #{pane_index} - (%H:%M %d-%b-%y)';
   const text = f.l ? fmt : t.expandPlain(fmt, fctx, { time: true });
   if (ctx.print && (f.p || ctx.fromShell)) { ctx.print(text); return; }
   t.ui.message(text, { duration: f.d != null ? Number(f.d) : undefined });
@@ -863,11 +888,11 @@ def('command-prompt', null, '1beFiklNI:p:t:T:W', async (t, f, a, ctx) => {
   let template = a.length ? (a.length === 1 ? argToString(a[0]).replace(/^\{ (.*) \}$/s, '$1') : asCommandString(a)) : null;
   if (template && f.F) template = t.expandPlain(template, ctx);
   const cmdName = template ? template.trim().split(/\s+/)[0] : null;
-  const prompts = f.p != null ? splitList(t.expandPlain(f.p as string, ctx)).map((p) => p + ' ')
+  const prompts = f.p != null ? splitList(t.expandPlain(f.p, ctx)).map((p) => p + ' ')
     : [template ? `(${cmdName}) ` : ':'];
   const inputs = f.I != null ? splitList(f.I).map((s) => t.expandPlain(s, ctx)) : [];
   const answers = await t.ui.prompt({
-    prompts, inputs, single: !!f[1], numeric: !!f.N, type: (f.T as string) || 'command', command: !template,
+    prompts, inputs, single: !!f[1], numeric: !!f.N, type: str(f.T) || 'command', command: !template,
   });
   if (!answers) return;
   if (!template) {
@@ -881,12 +906,12 @@ def('command-prompt', null, '1beFiklNI:p:t:T:W', async (t, f, a, ctx) => {
 
 def('confirm-before', 'confirm', 'bc:p:t:y', async (t, f, a, ctx) => {
   const cmd = a.length === 1 ? argToString(a[0]).replace(/^\{ (.*) \}$/s, '$1') : asCommandString(a);
-  const prompt = f.p != null ? t.expandPlain(f.p as string, ctx) : `Confirm '${cmd}'? (y/n)`;
-  const ok = await t.ui.confirm(prompt, { defaultYes: !!f.y, confirmKey: (f.c as string) || 'y' });
+  const prompt = f.p != null ? t.expandPlain(f.p, ctx) : `Confirm '${cmd}'? (y/n)`;
+  const ok = await t.ui.confirm(prompt, { defaultYes: !!f.y, confirmKey: str(f.c) || 'y' });
   if (ok) await t.runString(cmd, ctx);
 });
 
-def('show-messages', 'showmsgs', 'JTt:', (t) => t.ui.showMessages?.());
+def('show-messages', 'showmsgs', 'JTt:', (t) => t.ui.showMessages());
 
 def('list-commands', 'lscm', 'F:', (t) => {
   const lines = [...COMMANDS.values()].map((c) => {
@@ -898,13 +923,13 @@ def('list-commands', 'lscm', 'F:', (t) => {
 
 def('clock-mode', null, 't:', (t, f, a, ctx) => {
   const r = target(t, f.t, 'pane', ctx);
-  t.ui.clock?.(r.pane);
+  t.ui.clock(r.pane);
 });
 
 def('copy-mode', null, 'deHMqs:t:u', (t, f, a, ctx) => {
   const r = target(t, f.t, 'pane', ctx);
-  if (f.q) { t.ui.paneCommand?.(r.pane, { type: 'copy-cmd', args: ['cancel'] }); return; }
-  t.ui.copyMode?.(r.pane, { scrollUp: !!f.u, exitAtBottom: !!f.e });
+  if (f.q) { void t.ui.paneCommand(r.pane, { type: 'copy-cmd', args: ['cancel'] }); return; }
+  void t.ui.copyMode(r.pane, { scrollUp: !!f.u, exitAtBottom: !!f.e });
 });
 
 def('send-keys', 'send', 'c:FHKlMN:Rt:X', async (t, f, a, ctx) => {
@@ -914,11 +939,11 @@ def('send-keys', 'send', 'c:FHKlMN:Rt:X', async (t, f, a, ctx) => {
     const p = t.server.panes[r.pane];
     if (!p?.mode) return;
     const repeat = Number(f.N) || 1;
-    for (let i = 0; i < repeat; i++) await t.ui.paneCommand?.(r.pane, { type: 'copy-cmd', args });
+    for (let i = 0; i < repeat; i++) await t.ui.paneCommand(r.pane, { type: 'copy-cmd', args });
     return;
   }
   if (f.R || f.M) return;
-  await t.ui.paneCommand?.(r.pane, { type: 'send-keys', keys: args, literal: !!f.l });
+  await t.ui.paneCommand(r.pane, { type: 'send-keys', keys: args, literal: !!f.l });
 });
 
 def('send-prefix', null, '2t:', (t) => {
@@ -929,11 +954,13 @@ def('send-prefix', null, '2t:', (t) => {
 
 def('set-buffer', 'setb', 'aAb:n:t:w', (t, f, a) => {
   const data = argToString(a[0] ?? '');
-  const existing = f.b ? t.buffers.find((x) => x.name === f.b) : t.buffers[0];
-  if (f.n) { if (!existing) throw new Error('no buffer'); existing.name = f.n as string; return; }
+  const name = str(f.b);
+  const existing = name ? t.buffers.find((x) => x.name === name) : t.buffers[0];
+  const newName = str(f.n);
+  if (newName) { if (!existing) throw new Error('no buffer'); existing.name = newName; return; }
   if (f.a && existing) existing.data += data;
-  else pushBuffer(t, data, f.b as string | undefined);
-  if (f.w) t.ui.writeClipboard?.(data);
+  else pushBuffer(t, data, name);
+  if (f.w) void t.ui.writeClipboard(data);
 });
 
 def('delete-buffer', 'deleteb', 'b:', (t, f) => {
@@ -955,7 +982,7 @@ def('paste-buffer', 'pasteb', 'b:dprs:t:', async (t, f, a, ctx) => {
   const r = target(t, f.t, 'pane', ctx);
   const b = f.b ? t.buffers.find((x) => x.name === f.b) : t.buffers[0];
   if (!b) return;
-  await t.ui.paneCommand?.(r.pane, { type: 'paste', text: b.data });
+  await t.ui.paneCommand(r.pane, { type: 'paste', text: b.data });
   if (f.d) t.buffers = t.buffers.filter((x) => x !== b);
 });
 
@@ -966,20 +993,19 @@ def('choose-buffer', null, 'F:f:K:NO:rt:yZ', async (t, f, a, ctx) => {
     items: t.buffers.map((b, i) => ({ label: `${b.name}: "${b.data.slice(0, 80).replace(/\n/g, '\\n')}"`, value: i })),
   });
   if (choice == null) return;
-  const b = t.buffers[choice as number];
+  const b = t.buffers[typeof choice === 'number' ? choice : choice.value];
   const r = target(t, f.t, 'pane', ctx);
-  await t.ui.paneCommand?.(r.pane, { type: 'paste', text: b.data });
+  await t.ui.paneCommand(r.pane, { type: 'paste', text: b.data });
 });
 
 
 // ------------------------------------------------------- menus / popups
 
 /** Turn a menu item command (string or { block }) into a command string with formats expanded. */
-function menuCommand(t: Tmux, cmd: CommandArg | undefined, fctx: CommandContext) {
-  let str = cmd == null ? '' : (typeof cmd === 'string' ? cmd : (cmd as { text?: string }).text ?? argToString(cmd));
+function menuCommand(t: Tmux, cmd: CommandArg | undefined, fctx: CommandContext): string {
+  const text = cmd == null ? '' : (typeof cmd === 'string' ? cmd : cmd.text);
   // Bindings store `{ ... }` blocks as text; unwrap them like command-prompt does.
-  str = str.replace(/^\{\s*(.*?)\s*\}$/s, '$1');
-  return t.expandPlain(str, fctx);
+  return t.expandPlain(text.replace(/^\{\s*(.*?)\s*\}$/s, '$1'), fctx);
 }
 
 def('display-menu', 'menu', 'b:c:C:H:MOs:S:t:T:x:y:', async (t, f, a, ctx) => {
@@ -997,34 +1023,26 @@ def('display-menu', 'menu', 'b:c:C:H:MOs:S:t:T:x:y:', async (t, f, a, ctx) => {
     if (disabled) label = label.slice(1);
     items.push({ label, key, disabled, command: menuCommand(t, cmd, fctx) });
   }
-  const selectable = items.filter((x) => !x.separator && !x.disabled);
-  if (!selectable.length) return;
-  const title = f.T != null ? t.expandPlain(f.T as string, fctx) : '';
-  let chosen: MenuItem | null | undefined;
-  if (t.ui.menu) {
-    chosen = await t.ui.menu({ title, items, start: f.C != null ? Number(f.C) : 0, x: f.x, y: f.y });
-  } else {
-    const v = await t.ui.pick({ title: title || 'menu', fuzzy: false, items: selectable.map((x) => ({ label: x.key ? `(${x.key}) ${x.label}` : x.label ?? '', value: items.indexOf(x) })) });
-    chosen = v == null ? null : items[v as number];
-  }
+  if (!items.some((x) => !x.separator && !x.disabled)) return;
+  const title = f.T != null ? t.expandPlain(f.T, fctx) : '';
+  const chosen = await t.ui.menu({ title, items, start: f.C != null ? Number(f.C) : 0, x: f.x, y: f.y });
   if (!chosen || chosen.disabled || chosen.separator || !chosen.command) return;
   await t.runString(chosen.command, { ...ctx, ...fctx, fromKey: true });
 });
 
 def('display-popup', 'popup', 'BCEkNb:c:d:e:h:s:S:t:T:w:x:y:', async (t, f, a, ctx) => {
-  if (f.C) { t.ui.closePopup?.(); return; }
+  if (f.C) { t.ui.closePopup(); return; }
   const r: Partial<Target> = resolveTarget(t.server, f.t, 'pane', ctx, t.ui.geometry()) || {};
   const fctx = { session: r.session, window: r.window, pane: r.pane };
   let cmd = a.length ? asCommandString(a) : '';
   if (!cmd) cmd = t.getOption('default-command');
-  if (!cmd && f.d) cmd = t.expandPlain(f.d as string, fctx);
-  const geometry = { width: f.w, height: f.h, x: f.x, y: f.y, title: f.T != null ? t.expandPlain(f.T as string, fctx) : '', border: f.B ? 'none' : f.b };
+  if (!cmd && f.d) cmd = t.expandPlain(f.d, fctx);
+  const geometry = { width: f.w, height: f.h, x: f.x, y: f.y, title: f.T != null ? t.expandPlain(f.T, fctx) : '', border: f.B ? 'none' : f.b } satisfies PopupOptions;
   if (cmd && looksLikeUrl(cmd)) {
-    if (!t.ui.popup) { t.ui.openTab?.(toUrl(cmd, t.getOption('@ctmux-search-url'))); return; }
     t.ui.popup({ ...geometry, url: toUrl(cmd, t.getOption('@ctmux-search-url')) });
     return;
   }
-  if (!cmd) { t.ui.popup?.({ ...geometry, url: '' }); return; }
+  if (!cmd) { t.ui.popup({ ...geometry, url: '' }); return; }
   const res = await t.shell(t.expandPlain(cmd, fctx), { ...ctx, ...fctx });
   if (!res) {
     t.notice(`display-popup "${short(cmd)}": shell commands can't run in the browser (a URL opens in the popup)`, { source: ctx.source, line: ctx.line, level: 'info', key: 'popup:' + cmd });
@@ -1032,17 +1050,15 @@ def('display-popup', 'popup', 'BCEkNb:c:d:e:h:s:S:t:T:w:x:y:', async (t, f, a, c
     return;
   }
   const out = res.out.replace(/\n$/, '');
-  if (out && !f.E) {
-    if (t.ui.popup) t.ui.popup({ ...geometry, text: out });
-    else t.ui.showList({ title: geometry.title || 'popup', lines: out.split('\n') });
-  }
+  if (out && !f.E) t.ui.popup({ ...geometry, text: out });
 });
 
 // --------------------------------------------------------- synchronisation
 
-function channel(t: Tmux, name: string) {
-  if (!t.waitChannels.has(name)) t.waitChannels.set(name, { waiters: [], woken: false, locked: false, lockers: [] });
-  return t.waitChannels.get(name)!;
+function channel(t: Tmux, name: string): WaitChannel {
+  let ch = t.waitChannels.get(name);
+  if (!ch) { ch = { waiters: [], woken: false, locked: false, lockers: [] }; t.waitChannels.set(name, ch); }
+  return ch;
 }
 
 def('wait-for', 'wait', 'LSU', async (t, f, a, ctx) => {
@@ -1079,10 +1095,11 @@ def('wait-for', 'wait', 'LSU', async (t, f, a, ctx) => {
 def('capture-pane', 'capturep', 'ab:CeE:JNpPqS:t:T', async (t, f, a, ctx) => {
   const r = target(t, f.t, 'pane', ctx);
   const p = t.server.panes[r.pane];
-  let text = '';
+  let text: string;
   if (p.kind === 'web') {
-    const res = await t.ui.paneCommand?.(r.pane, { type: 'capture', all: f.S === '-' }) as { text?: string } | undefined;
-    text = res?.text ?? [p.title, p.url].filter(Boolean).join('\n');
+    const res: unknown = await t.ui.paneCommand(r.pane, { type: 'capture', all: f.S === '-' });
+    const captured = typeof res === 'object' && res !== null && 'text' in res && typeof res.text === 'string' ? res.text : undefined;
+    text = captured ?? [p.title, p.url].filter(Boolean).join('\n');
   } else {
     text = p.prefill || '';
   }
@@ -1095,7 +1112,7 @@ def('capture-pane', 'capturep', 'ab:CeE:JNpPqS:t:T', async (t, f, a, ctx) => {
   }
   text = ls.join('\n');
   if (f.p) { t.output(ctx, ls, 'capture-pane'); return; }
-  pushBuffer(t, text, f.b as string | undefined);
+  pushBuffer(t, text, str(f.b));
 });
 
 function pushBuffer(t: Tmux, data: string, name: string | undefined) {
@@ -1114,21 +1131,22 @@ def('save-buffer', 'saveb', 'ab:', (t, f, a, ctx) => {
   const b = f.b ? t.buffers.find((x) => x.name === f.b) : t.buffers[0];
   if (!b) throw new Error('no buffers');
   const path = argToString(a[0] ?? '-');
-  if (path === '-' && ctx.print) { b.data.split('\n').forEach((l) => ctx.print!(l)); return; }
+  if (path === '-' && ctx.print) { for (const l of b.data.split('\n')) ctx.print(l); return; }
   // No file system: the closest useful thing is the system clipboard.
-  t.ui.writeClipboard?.(b.data);
+  void t.ui.writeClipboard(b.data);
   if (path !== '-') t.notice(`save-buffer ${path}: no file system in the browser; copied to the clipboard instead`, { level: 'info', key: 'save-buffer' });
 });
 
 def('load-buffer', 'loadb', 'b:t:w', async (t, f, a) => {
   const path = argToString(a[0] ?? '-');
   let data: string;
-  if (path === '-') data = (await t.ui.readClipboard?.()) ?? '';
+  // `?? ''`: test stubs answer unknown UI calls with undefined.
+  if (path === '-') data = (await t.ui.readClipboard()) ?? '';
   else {
-    try { data = await t.loadFile(path); } catch (err) { throw new Error(`${path}: ${(err as Error).message || err}`); }
+    try { data = await t.loadFile(path); } catch (err) { throw new Error(`${path}: ${errorText(err)}`, { cause: err }); }
   }
-  pushBuffer(t, String(data), f.b as string | undefined);
-  if (f.w) t.ui.writeClipboard?.(String(data));
+  pushBuffer(t, String(data), str(f.b));
+  if (f.w) void t.ui.writeClipboard(String(data));
 });
 
 def('pipe-pane', 'pipep', 'IOot:', (t, f, a, ctx) => {
@@ -1138,7 +1156,7 @@ def('pipe-pane', 'pipep', 'IOot:', (t, f, a, ctx) => {
 // ------------------------------------------------------- clients / server
 
 def('list-clients', 'lsc', 'F:f:t:', (t, f, a, ctx) => {
-  const fmt = (f.F as string) || '#{client_name}: #{session_name} [#{client_width}x#{client_height} #{client_termname}] (utf8)';
+  const fmt = str(f.F) || '#{client_name}: #{session_name} [#{client_width}x#{client_height} #{client_termname}] (utf8)';
   t.output(ctx, [t.expandPlain(fmt)], 'list-clients');
 });
 
@@ -1149,7 +1167,7 @@ def('attach-session', ['attach', 'a', 'at'], 'c:dEf:rt:x', (t, f, a, ctx) => {
     t.server.switchTo(r.session);
     if (r.window) t.server.selectWindow(r.session, r.window);
   }
-  t.ui.focusPane?.();
+  t.ui.focusPane();
 });
 
 def('start-server', 'start', '', () => {});
@@ -1159,16 +1177,16 @@ def('unlink-window', 'unlinkw', 'kt:', (t, f, a, ctx) => {
   const r = target(t, f.t, 'window', ctx);
   if (!f.k && r.session.windows.length <= 1 && t.server.sessions.length <= 1) throw new Error('window only linked to one session');
   t.server.killWindow(r.session, r.window);
-  t.ui.serverEmpty?.();
-  t.ui.focusPane?.();
+  t.ui.serverEmpty();
+  t.ui.focusPane();
 });
-def('customize-mode', null, 'F:f:Nt:yZ', (t, f, a, ctx) => COMMANDS.get('show-options')!.run(t, {}, [], ctx));
-def('show-prompt-history', 'showphist', 'T:', (t, f, a, ctx) => t.output(ctx, t.ui.promptHistory?.() || [], 'prompt history'));
-def('clear-prompt-history', 'clearphist', 'T:', (t) => t.ui.clearPromptHistory?.());
+def('customize-mode', null, 'F:f:Nt:yZ', (t, f, a, ctx) => builtin('show-options').run(t, {}, [], ctx));
+def('show-prompt-history', 'showphist', 'T:', (t, f, a, ctx) => t.output(ctx, t.ui.promptHistory() || [], 'prompt history'));
+def('clear-prompt-history', 'clearphist', 'T:', (t) => t.ui.clearPromptHistory());
 
 // ---------------------------------------------------- chrome-tmux specific
 
-function navigate(t: Tmux, paneId: number, input: string) {
+function navigate(t: Tmux, paneId: number, input: string): void {
   const p = t.server.panes[paneId];
   const url = toUrl(input, t.getOption('@ctmux-search-url'));
   if (!url) {
@@ -1180,8 +1198,8 @@ function navigate(t: Tmux, paneId: number, input: string) {
     p.url = url;
     if (!p.manualTitle) p.title = '';
   }
-  t.ui.renderPane?.(paneId, { navigate: true });
-  t.ui.focusPane?.(paneId);
+  t.ui.renderPane(paneId, { navigate: true });
+  t.ui.focusPane(paneId);
 }
 
 def('goto', ['open', 'open-url'], 't:', (t, f, a, ctx) => {
@@ -1189,20 +1207,20 @@ def('goto', ['open', 'open-url'], 't:', (t, f, a, ctx) => {
   navigate(t, r.pane, a.map(argToString).join(' '));
 });
 
-for (const action of ['back', 'forward', 'reload']) {
+for (const action of ['back', 'forward', 'reload'] as const) {
   def(action, null, 't:', (t, f, a, ctx) => {
     const r = target(t, f.t, 'pane', ctx);
-    t.ui.paneCommand?.(r.pane, { type: 'nav', action });
+    void t.ui.paneCommand(r.pane, { type: 'nav', action });
   });
 }
 
 def('open-in-tab', null, 't:', (t, f, a, ctx) => {
   const r = target(t, f.t, 'pane', ctx);
   const p = t.server.panes[r.pane];
-  if (p.kind === 'web' && p.url) t.ui.openTab?.(p.url);
+  if (p.kind === 'web' && p.url) t.ui.openTab(p.url);
   else t.ui.message('pane has no page');
 });
 
-def('ctmux-debug', null, '', (t) => t.ui.showMessages?.());
+def('ctmux-debug', null, '', (t) => t.ui.showMessages());
 
 export { navigate, paneShortName, formatCommandList };
