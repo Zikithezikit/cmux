@@ -20,18 +20,11 @@ type StubOverrides = { [K in keyof Ui]?: (...args: never[]) => unknown };
 type Engine = Tmux & { ui: StubUi };
 
 /** A fetch stub: resolves to a minimal Response-like object. */
-type StubFetch = (url: string) => Promise<unknown>;
+type StubFetch = TpmFetch;
 
-/**
- * TPM's timer and fetch dependencies, stubbed. The stubs don't match TpmTimers/TpmFetch
- * exactly (a numeric interval handle, a Response-like object), so the casts live here
- * and can be dropped in one place if those types are narrowed to what TPM uses.
- */
+/** TPM's timer and fetch dependencies, stubbed (timers never fire). */
 function tpmDeps(fetchImpl: StubFetch): { timers: TpmTimers; fetchImpl: TpmFetch } {
-  return {
-    timers: { setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout } as unknown as TpmTimers,
-    fetchImpl: fetchImpl as unknown as TpmFetch,
-  };
+  return { timers: { setInterval: () => 0, clearInterval() {} }, fetchImpl };
 }
 
 /** Assert that a value is present and return it (an assertion failure, not a TypeError). */
@@ -56,7 +49,7 @@ function stubUi(extra: StubOverrides = {}): StubUi {
 async function boot(conf: string, { ui = stubUi() }: { ui?: StubUi } = {}): Promise<{ t: Engine; ui: StubUi }> {
   const t = new Tmux({ ui }) as Engine;
   t.platform = 'Linux';
-  const tpm = new Tpm(t, { storage: memoryStorage(), ...tpmDeps(async () => ({ ok: false })) });
+  const tpm = new Tpm(t, { storage: memoryStorage(), ...tpmDeps(async () => ({ ok: false, status: 0, json: async () => null })) });
   await t.loadDefaults();
   t.server.newSession({});
   if (conf) await t.runConfig(conf, { source: 'test.conf' });

@@ -22,20 +22,13 @@ interface BootOptions {
 }
 
 /** A fetch stub: resolves to a minimal Response-like object. */
-type StubFetch = (url: string) => Promise<unknown>;
+type StubFetch = TpmFetch;
 
 const fixture = readFileSync(new URL('./fixtures/user.tmux.conf', import.meta.url), 'utf8');
 
-/**
- * TPM's timer and fetch dependencies, stubbed. The stubs don't match TpmTimers/TpmFetch
- * exactly (a numeric interval handle, a Response-like object), so the casts live here
- * and can be dropped in one place if those types are narrowed to what TPM uses.
- */
+/** TPM's timer and fetch dependencies, stubbed (timers never fire). */
 function tpmDeps(fetchImpl: StubFetch): { timers: TpmTimers; fetchImpl: TpmFetch } {
-  return {
-    timers: { setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout } as unknown as TpmTimers,
-    fetchImpl: fetchImpl as unknown as TpmFetch,
-  };
+  return { timers: { setInterval: () => 0, clearInterval() {} }, fetchImpl };
 }
 
 /** Assert that a value is present and return it (an assertion failure, not a TypeError). */
@@ -63,7 +56,8 @@ function stubUi(extra: StubOverrides = {}): StubUi {
   return new Proxy(ui, { get: (o, p) => (p in o ? o[p as keyof typeof o] : () => {}) }) as unknown as StubUi;
 }
 
-const weatherFetch: StubFetch = async () => ({ ok: true, text: async () => 'Sunny +21°C' });
+/** A weather endpoint that answers but whose body can't be read (no weather in tests). */
+const weatherFetch: StubFetch = async () => ({ ok: true, status: 200, json: async () => { throw new Error('no body'); } });
 
 async function boot(conf: string, { ui = stubUi(), storage = memoryStorage(), fetchImpl = weatherFetch }: BootOptions = {}): Promise<{ t: Engine; tpm: Tpm; ui: StubUi }> {
   const t = new Tmux({ ui }) as Engine;
