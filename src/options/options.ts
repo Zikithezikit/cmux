@@ -1,20 +1,62 @@
-// @ts-nocheck
 import { Tmux } from '../core/tmux.js';
 import { Tpm, memoryStorage } from '../tpm/tpm.js';
 import {
   CONF_KEY, getConfRecord, setConfRecord, fileAccessAllowed, readLocalFile,
 } from '../shared/config-source.js';
+import type { Notice } from '../core/types.js';
 
-const $ = (id) => document.getElementById(id);
+/** The stored configuration record (see src/shared/config-source.ts). */
+interface ConfRecord {
+  text?: string;
+  path?: string;
+  name?: string;
+  origin?: string;
+  updatedAt: number;
+}
+
+/** The parts of a tmux-resurrect snapshot this page shows. */
+interface ResurrectSnapshot {
+  savedAt: number;
+  sessions: unknown[];
+}
+
+/** The elements of options.html, by id. */
+interface OptionsElements {
+  'open': HTMLButtonElement;
+  'ext-details': HTMLAnchorElement;
+  'file-access': HTMLElement;
+  'path-form': HTMLFormElement;
+  'path': HTMLInputElement;
+  'file': HTMLInputElement;
+  'text': HTMLTextAreaElement;
+  'save-text': HTMLButtonElement;
+  'source-label': HTMLSpanElement;
+  'status': HTMLParagraphElement;
+  'report': HTMLDivElement;
+  'app-cmd': HTMLPreElement;
+  'clear-resurrect': HTMLButtonElement;
+  'clear-history': HTMLButtonElement;
+  'state-info': HTMLSpanElement;
+}
+
+type Child = Node | string | number | boolean | null | undefined;
+
+/** Engine state the report reads (Tmux is not typed yet). */
+interface ReportEngine {
+  tables: Map<string, Map<string, { origin: string }>>;
+  notices: Notice[];
+}
+
+const $ = <K extends keyof OptionsElements>(id: K) => document.getElementById(id) as OptionsElements[K];
 const WORKSPACE = chrome.runtime.getURL('src/workspace/workspace.html');
 
-function status(text, ok = true) {
+function status(text: string, ok = true) {
   const el = $('status');
   el.textContent = text;
   el.className = ok ? 'ok' : 'err';
 }
 
-function el(tag, props = {}, ...children) {
+function el<K extends keyof HTMLElementTagNameMap>(tag: K, props: Record<string, string> = {}, ...children: (Child | Child[])[]): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(props)) {
     if (k === 'class') e.className = v; else e.setAttribute(k, v);
@@ -24,11 +66,11 @@ function el(tag, props = {}, ...children) {
 }
 
 /** Dry-run the config through the real engine and show what it understood. */
-async function report(text) {
+async function report(text: string) {
   const box = $('report');
   box.textContent = '';
   if (!text) { box.append(el('p', { class: 'hint' }, 'No configuration loaded — built-in tmux defaults (prefix C-b) will be used.')); return; }
-  const t = new Tmux({ loadFile: async () => '' });
+  const t = new Tmux({ loadFile: async () => '' }) as Tmux & ReportEngine;
   const tpm = new Tpm(t, { storage: memoryStorage(), fetchImpl: async () => ({ ok: false, status: 0 }), timers: { setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout } });
   await t.loadDefaults();
   await t.runConfig(text, { source: '~/.tmux.conf' });
@@ -61,7 +103,7 @@ async function report(text) {
 }
 
 async function refresh() {
-  const rec = await getConfRecord();
+  const rec = await getConfRecord() as ConfRecord | null;
   $('text').value = rec?.text || '';
   if (rec?.path) $('path').value = rec.path;
   $('source-label').textContent = rec
@@ -87,17 +129,17 @@ async function init() {
     if (!path) return;
     if (path.startsWith('~')) { status('Use an absolute path, e.g. /home/you/.tmux.conf (the browser does not know your home directory).', false); return; }
     try {
-      const text = await readLocalFile(path);
+      const text = await readLocalFile(path) as string;
       await setConfRecord({ path, text, origin: 'path' });
       status(`Loaded ${path} (${text.split('\n').length} lines).`);
       await refresh();
     } catch (err) {
-      status(`${err.message}. ${allowed ? '' : 'Enable "Allow access to file URLs" first.'}`, false);
+      status(`${(err as Error).message}. ${allowed ? '' : 'Enable "Allow access to file URLs" first.'}`, false);
     }
   });
 
   $('file').addEventListener('change', async () => {
-    const f = $('file').files[0];
+    const f = $('file').files![0];
     if (!f) return;
     const text = await f.text();
     await setConfRecord({ text, name: f.name, origin: 'upload' });
@@ -106,7 +148,7 @@ async function init() {
   });
 
   $('save-text').addEventListener('click', async () => {
-    const rec = await getConfRecord();
+    const rec = await getConfRecord() as ConfRecord | null;
     const text = $('text').value;
     if (rec?.path) {
       status('Saved text replaces the disk path: the workspace will use this text from now on.');
@@ -125,7 +167,7 @@ async function init() {
     await chrome.storage.local.remove('ctmux:history');
     $('state-info').textContent = 'URL history cleared.';
   });
-  const snap = (await chrome.storage.local.get('ctmux:resurrect:last'))['ctmux:resurrect:last'];
+  const snap = (await chrome.storage.local.get('ctmux:resurrect:last'))['ctmux:resurrect:last'] as ResurrectSnapshot | undefined;
   if (snap) $('state-info').textContent = `Last resurrect save: ${new Date(snap.savedAt).toLocaleString()} (${snap.sessions.length} sessions)`;
 
   chrome.storage.onChanged.addListener((changes, area) => { if (area === 'local' && changes[CONF_KEY]) refresh(); });

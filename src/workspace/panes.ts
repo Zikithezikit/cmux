@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Pane DOM management. Every pane of every window lives in one flat
 // container and is only ever repositioned/hidden — never re-parented —
 // so iframes keep their state when windows or layouts change.
@@ -6,6 +5,44 @@
 import * as L from '../core/layout.js';
 import { toRuns, parseStyle, styleToCss, colourToCss } from '../core/format.js';
 import { renderRuns } from './status.js';
+import type { Tmux } from '../core/tmux.js';
+import type { Divider, Pane, PaneKind, Rect, Window as TmuxWindow } from '../core/types.js';
+
+/** An entry of the launcher's URL history. */
+export interface HistoryEntry {
+  url: string;
+  title?: string;
+}
+
+/** The DOM of one pane. */
+export interface PaneEls {
+  root: HTMLDivElement;
+  body: HTMLDivElement;
+  title: HTMLDivElement;
+  kind: PaneKind | null;
+  url: string | null;
+  iframe?: HTMLIFrameElement | null;
+  input?: HTMLInputElement | null;
+}
+
+/** The server surface PaneView uses (Server is not typed yet). */
+export interface PaneViewServer {
+  readonly window: TmuxWindow | null;
+  panes: Record<number, Pane>;
+  markedPane(): number | null;
+  changed(reason?: string): void;
+}
+
+/** The engine surface PaneView uses. */
+export type PaneViewEngine = Pick<Tmux, 'getOption' | 'expand'> & { server: PaneViewServer };
+
+export interface PaneViewOptions {
+  panesEl: HTMLDivElement;
+  decorEl: HTMLDivElement;
+  shieldEl: HTMLDivElement;
+  onLauncherSubmit: (paneId: number, value: string) => void;
+  history: () => HistoryEntry[];
+}
 
 const SANDBOX = [
   'allow-scripts', 'allow-same-origin', 'allow-forms', 'allow-popups',
@@ -17,7 +54,18 @@ const ALLOW = 'clipboard-read; clipboard-write; fullscreen; autoplay; encrypted-
 export const GAP = 1;
 
 export class PaneView {
-  constructor(t, { panesEl, decorEl, shieldEl, onLauncherSubmit, history }) {
+  declare t: PaneViewEngine;
+  declare panesEl: HTMLDivElement;
+  declare decorEl: HTMLDivElement;
+  declare shieldEl: HTMLDivElement;
+  declare onLauncherSubmit: (paneId: number, value: string) => void;
+  declare history: () => HistoryEntry[];
+  declare els: Map<number, PaneEls>;
+  declare rects: Record<number, Rect>;
+  declare dividers: Divider[];
+  declare areaRect: Rect;
+
+  constructor(t: PaneViewEngine, { panesEl, decorEl, shieldEl, onLauncherSubmit, history }: PaneViewOptions) {
     this.t = t;
     this.panesEl = panesEl;
     this.decorEl = decorEl;
@@ -29,17 +77,17 @@ export class PaneView {
     this.areaRect = { x: 0, y: 0, w: 0, h: 0 };
   }
 
-  area() {
+  area(): Rect {
     const r = this.panesEl.getBoundingClientRect();
     return { x: 0, y: 0, w: Math.round(r.width), h: Math.round(r.height) };
   }
 
-  ensure(pane) {
+  ensure(pane: Pane): PaneEls {
     let v = this.els.get(pane.id);
     if (!v) {
       const root = document.createElement('div');
       root.className = 'pane hidden';
-      root.dataset.pane = pane.id;
+      root.dataset.pane = pane.id as unknown as string;
       const body = document.createElement('div');
       body.className = 'body';
       const title = document.createElement('div');
@@ -60,11 +108,11 @@ export class PaneView {
     return v;
   }
 
-  mountFrame(pane, v) {
+  mountFrame(pane: Pane, v: PaneEls) {
     const f = document.createElement('iframe');
     f.className = 'frame';
     f.name = `ctmux-pane-${pane.id}`;
-    f.dataset.pane = pane.id;
+    f.dataset.pane = pane.id as unknown as string;
     f.setAttribute('sandbox', SANDBOX);
     f.setAttribute('allow', ALLOW);
     f.src = pane.url;
@@ -73,7 +121,7 @@ export class PaneView {
     v.body.appendChild(f);
   }
 
-  mountLauncher(pane, v) {
+  mountLauncher(pane: Pane, v: PaneEls) {
     const t = this.t;
     const box = document.createElement('div');
     box.className = 'launcher';
@@ -95,7 +143,7 @@ export class PaneView {
     input.placeholder = 'url, search, or :command';
     input.setAttribute('list', 'ctmux-history');
     input.value = pane.prefill || '';
-    input.dataset.pane = pane.id;
+    input.dataset.pane = pane.id as unknown as string;
     form.append(ps1, input);
     form.addEventListener('submit', (e) => {
       e.preventDefault();
@@ -123,7 +171,7 @@ export class PaneView {
     v.body.appendChild(box);
   }
 
-  navigate(pane) {
+  navigate(pane: Pane) {
     const v = this.els.get(pane.id);
     if (!v) return;
     if (pane.kind === 'web' && v.kind === 'web' && v.iframe) {
@@ -134,7 +182,7 @@ export class PaneView {
     }
   }
 
-  remount(pane) {
+  remount(pane: Pane) {
     const v = this.els.get(pane.id);
     if (v) v.kind = null;
     this.ensure(pane);
@@ -153,8 +201,8 @@ export class PaneView {
     }
     for (const p of Object.values(srv.panes)) this.ensure(p);
 
-    let rects = {};
-    let dividers = [];
+    let rects: Record<number, Rect> = {};
+    let dividers: Divider[] = [];
     if (window) {
       if (window.zoomed) rects = { [window.active]: area };
       else ({ panes: rects, dividers } = L.computeRects(window.layout, area, GAP));
@@ -179,7 +227,7 @@ export class PaneView {
       v.root.classList.toggle('marked', Number(id) === marked);
       v.title.textContent = '';
       if (showTitle) {
-        const active = Number(id) === window.active;
+        const active = Number(id) === window!.active;
         const st = active ? activeStyle : borderStyle;
         const runs = toRuns(t.expand(t.getOption('pane-border-format'), { window, pane: Number(id) }, { time: true }), st);
         renderRuns(v.title, runs);
@@ -189,7 +237,7 @@ export class PaneView {
 
     // Borders.
     this.decorEl.textContent = '';
-    const fg = (s, fallback) => s.fg || fallback;
+    const fg = (s: { fg?: string | null }, fallback: string | null) => s.fg || fallback;
     document.documentElement.style.setProperty('--border', fg(borderStyle, colourToCss('colour240')));
     document.documentElement.style.setProperty('--border-active', fg(activeStyle, colourToCss('green')));
     for (const d of dividers) {
@@ -217,7 +265,7 @@ export class PaneView {
     }
   }
 
-  startDrag(e, d) {
+  startDrag(e: MouseEvent, d: Divider) {
     if (e.button !== 0) return;
     e.preventDefault();
     const t = this.t;
@@ -226,7 +274,7 @@ export class PaneView {
     this.shieldEl.classList.add('on');
     this.shieldEl.style.cursor = d.dir === 'h' ? 'col-resize' : 'row-resize';
     const origin = this.panesEl.getBoundingClientRect();
-    const move = (ev) => {
+    const move = (ev: MouseEvent) => {
       const pos = d.dir === 'h' ? ev.clientX - origin.left : ev.clientY - origin.top;
       window.layout = L.setDivider(window.layout, d.path, d.index, Math.round(pos), this.areaRect, GAP);
       this.render();
@@ -241,15 +289,15 @@ export class PaneView {
     addEventListener('mouseup', up, true);
   }
 
-  focus(paneId) {
+  focus(paneId: number) {
     const v = this.els.get(paneId);
     if (!v) return;
     if (v.iframe) v.iframe.focus();
     else if (v.input) v.input.focus();
   }
 
-  paneAt(el) {
-    const host = el?.closest?.('[data-pane]');
+  paneAt(el: EventTarget | null): number | null {
+    const host = (el as Element | null)?.closest?.<HTMLElement>('[data-pane]');
     return host ? Number(host.dataset.pane) : null;
   }
 }
