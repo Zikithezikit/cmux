@@ -1,16 +1,28 @@
-// @ts-nocheck
 // dracula/tmux theme: re-implements scripts/dracula.sh status-line generation.
 // Status-bar widgets that were shell scripts are provided as #{dracula_*}
 // format variables backed by browser APIs (wttr.in, getBattery, navigator).
 
-const C = {
+import type { PluginApi, PluginEmulator } from '../tpm.js';
+
+/** Battery Status API (not in lib.dom). */
+interface BatteryManager extends EventTarget {
+  level: number;
+  charging: boolean;
+}
+
+type BrowserNavigator = Navigator & {
+  connection?: { effectiveType?: string };
+  getBattery?(): Promise<BatteryManager>;
+};
+
+const C: Record<string, string> = {
   white: '#f8f8f2', gray: '#44475a', dark_gray: '#282a36', light_purple: '#bd93f9',
   dark_purple: '#6272a4', cyan: '#8be9fd', green: '#50fa7b', orange: '#ffb86c',
   red: '#ff5555', pink: '#ff79c6', yellow: '#f1fa8c',
 };
 
 // Default "<bg> <fg>" colours per widget, from dracula.sh.
-const WIDGET_COLOURS = {
+const WIDGET_COLOURS: Record<string, string> = {
   battery: 'pink dark_gray', network: 'cyan dark_gray', 'network-bandwidth': 'cyan dark_gray',
   'network-ping': 'cyan dark_gray', weather: 'orange dark_gray', time: 'dark_purple white',
   'cpu-usage': 'orange dark_gray', 'ram-usage': 'cyan dark_gray', git: 'green dark_gray',
@@ -21,7 +33,7 @@ const WIDGET_COLOURS = {
 
 const state = { weather: '', weatherAt: 0 };
 
-async function fetchWeather(api) {
+async function fetchWeather(api: PluginApi) {
   const fixed = api.option('@dracula-fixed-location', '');
   const fahrenheit = api.option('@dracula-show-fahrenheit', 'true') === 'true';
   const showLocation = api.option('@dracula-show-location', 'true') === 'true';
@@ -48,9 +60,9 @@ export default {
   description: 'Dracula theme: colours, powerline separators, left icon, window flags and status widgets.',
   optionPrefixes: ['@dracula'],
   apply(t, api) {
-    const opt = (name, def) => api.option(`@dracula-${name}`, def);
-    const bool = (name, def) => opt(name, def) === 'true';
-    const col = (name) => C[name] || name;
+    const opt = (name: string, def: string) => api.option(`@dracula-${name}`, def);
+    const bool = (name: string, def: string) => opt(name, def) === 'true';
+    const col = (name: string) => C[name] || name;
 
     const powerline = bool('show-powerline', 'false');
     const showFlags = bool('show-flags', 'false');
@@ -66,7 +78,7 @@ export default {
     const dayMonth = bool('day-month', 'false');
     const refresh = Number(opt('refresh-rate', '5')) || 5;
 
-    const icons = { smiley: '☺', session: '#S', window: '#W', hostname: '#H', shortname: '#h' };
+    const icons: Record<string, string> = { smiley: '☺', session: '#S', window: '#W', hostname: '#H', shortname: '#h' };
     const leftIcon = (icons[leftIconOpt] ?? leftIconOpt) + ' '.repeat(Math.max(0, leftPadding));
 
     api.set('status-interval', String(refresh));
@@ -93,11 +105,11 @@ export default {
     // Widgets.
     let right = '';
     let powerBg = C.gray;
-    const unsupported = [];
+    const unsupported: string[] = [];
     for (const name of plugins) {
       const key = name.startsWith('custom:') ? 'custom:' : name;
       const [bg, fg] = opt(`${name}-colors`, WIDGET_COLOURS[key] || 'cyan dark_gray').split(/\s+/).map(col);
-      let script;
+      let script: string;
       switch (name) {
         case 'time': {
           const fmt = opt('time-format', '') || (dayMonth ? '%d/%m' : '%a %m/%d') + (military ? ' %R' : ' %I:%M %p');
@@ -156,11 +168,11 @@ export default {
 
     api.formatVar('dracula_network', () => (typeof navigator !== 'undefined' && navigator.onLine === false
       ? 'Offline'
-      : (navigator.connection?.effectiveType ? `Online ${navigator.connection.effectiveType}` : 'Online')));
+      : ((navigator as BrowserNavigator).connection?.effectiveType ? `Online ${(navigator as BrowserNavigator).connection!.effectiveType}` : 'Online')));
 
-    let batt = null;
-    if (plugins.includes('battery') && typeof navigator !== 'undefined' && navigator.getBattery) {
-      navigator.getBattery().then((b) => {
+    let batt: BatteryManager | null = null;
+    if (plugins.includes('battery') && typeof navigator !== 'undefined' && (navigator as BrowserNavigator).getBattery) {
+      (navigator as BrowserNavigator).getBattery!().then((b) => {
         batt = b;
         b.addEventListener('levelchange', api.refresh);
         b.addEventListener('chargingchange', api.refresh);
@@ -173,4 +185,4 @@ export default {
       return batt.charging ? `AC ${pct}%` : `${pct}%`;
     });
   },
-};
+} satisfies PluginEmulator;

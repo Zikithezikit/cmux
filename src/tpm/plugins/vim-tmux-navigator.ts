@@ -1,13 +1,14 @@
-// @ts-nocheck
 // christoomey/vim-tmux-navigator: Ctrl-h/j/k/l (no prefix) move between panes.
 // Web pages are never vim, so the "is_vim" check always falls through to select-pane.
+
+import type { PluginEmulator } from '../tpm.js';
 
 export default {
   repo: 'christoomey/vim-tmux-navigator',
   description: 'C-h/C-j/C-k/C-l/C-\\ move between panes without the prefix (also in copy mode).',
   optionPrefixes: ['@vim_navigator'],
   apply(t, api) {
-    const maps = [
+    const maps: [string, string, string][] = [
       ['@vim_navigator_mapping_left', 'C-h', 'select-pane -L'],
       ['@vim_navigator_mapping_down', 'C-j', 'select-pane -D'],
       ['@vim_navigator_mapping_up', 'C-k', 'select-pane -U'],
@@ -23,4 +24,4 @@ export default {
     const clear = api.option('@vim_navigator_prefix_mapping_clear_screen', 'C-l');
     if (clear) api.bind('prefix', clear, 'send-keys C-l', { note: 'vim-tmux-navigator: clear screen' });
   },
-};
+} satisfies PluginEmulator;

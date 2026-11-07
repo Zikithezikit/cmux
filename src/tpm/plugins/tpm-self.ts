@@ -1,13 +1,14 @@
-// @ts-nocheck
 // tmux-plugins/tpm: prefix + I (install), U (update), M-u (clean).
 // "Installing" fetches plugin metadata from the GitHub API; emulators are built in.
+
+import type { PluginEmulator } from '../tpm.js';
 
 export default {
   repo: 'tmux-plugins/tpm',
   description: 'Plugin manager. Install/update fetch GitHub metadata; plugins themselves are built-in JS emulators.',
   optionPrefixes: ['@tpm'],
   apply(t, api) {
-    const tpm = t.plugins;
+    const tpm = t.plugins!;
     api.command({
       name: 'tpm-install', flags: '', async run(tt) {
         tt.ui.message('TPM: fetching plugin metadata from GitHub...');
@@ -33,4 +34,4 @@ export default {
     api.bind('prefix', api.option('@tpm-update', 'U'), 'tpm-update', { note: 'TPM: update plugins' });
     api.bind('prefix', api.option('@tpm-clean', 'M-u'), 'tpm-clean', { note: 'TPM: clean plugins' });
   },
-};
+} satisfies PluginEmulator;

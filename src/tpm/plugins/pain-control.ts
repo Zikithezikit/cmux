@@ -1,6 +1,7 @@
-// @ts-nocheck
 // tmux-plugins/tmux-pain-control: h/j/k/l navigation, H/J/K/L resizing,
 // | - \ _ splits and < > window swapping.
+
+import type { PluginEmulator } from '../tpm.js';
 
 export default {
   repo: 'tmux-plugins/tmux-pain-control',
@@ -8,7 +9,7 @@ export default {
   optionPrefixes: ['@pane_resize', '@disable_deprecated_nav_bindings'],
   apply(t, api) {
     const step = api.option('@pane_resize', '5');
-    const nav = { h: 'L', j: 'D', k: 'U', l: 'R' };
+    const nav: Record<string, string> = { h: 'L', j: 'D', k: 'U', l: 'R' };
     for (const [key, dir] of Object.entries(nav)) {
       api.bind('prefix', key, `select-pane -${dir}`, { note: `pain-control: select pane ${dir}` });
       api.bind('prefix', `C-${key}`, `select-pane -${dir}`, { note: `pain-control: select pane ${dir}` });
@@ -25,4 +26,4 @@ export default {
     api.bind('prefix', '>', 'swap-window -t +1 \\; select-window -t +1', { repeat: true, note: 'pain-control: move window right' });
     api.bind('prefix', 'c', `new-window ${path}`, { note: 'pain-control: new window' });
   },
-};
+} satisfies PluginEmulator;

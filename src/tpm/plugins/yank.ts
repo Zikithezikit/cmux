@@ -1,7 +1,8 @@
-// @ts-nocheck
 // tmux-plugins/tmux-yank: copy-mode `y` copies the selection to the system
 // clipboard (navigator.clipboard), mouse selections are copied when mouse is
 // on, prefix + y copies the pane URL and prefix + Y a Markdown link.
+
+import type { PluginEmulator } from '../tpm.js';
 
 export default {
   repo: 'tmux-plugins/tmux-yank',
@@ -30,4 +31,4 @@ export default {
     api.bind('prefix', api.option('@yank_line', 'y'), 'yank-pane', { note: 'yank: copy pane URL' });
     api.bind('prefix', api.option('@yank_pane_pwd', 'Y'), 'yank-pane -m', { note: 'yank: copy Markdown link' });
   },
-};
+} satisfies PluginEmulator;

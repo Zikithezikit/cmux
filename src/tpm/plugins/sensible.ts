@@ -1,6 +1,7 @@
-// @ts-nocheck
 // tmux-plugins/tmux-sensible: defaults "everyone can agree on".
 // Like the original it never overrides options the user set explicitly.
+
+import type { PluginEmulator } from '../tpm.js';
 
 export default {
   repo: 'tmux-plugins/tmux-sensible',
@@ -28,4 +29,4 @@ export default {
       if (!t.lookupKey('prefix', prefix)) api.bind('prefix', prefix, 'last-window', { note: 'sensible: last window' });
     }
   },
-};
+} satisfies PluginEmulator;
