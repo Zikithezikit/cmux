@@ -5,6 +5,9 @@ import { COMMANDS } from '../core/commands.js';
 import { colourToCss } from '../core/format.js';
 import * as L from '../core/layout.js';
 import { quoteArg } from '../core/parser.js';
+import { toUrl } from '../core/commands.js';
+
+const toPopupUrl = (v, t) => toUrl(v, t.getOption('@ctmux-search-url'));
 
 const { eventToKey } = globalThis.CtmuxKeys;
 
@@ -340,6 +343,122 @@ export class Overlays {
       entry.cleanup = () => { if (!done) resolve(null); };
       if (fz) entry.dom.querySelector('.ov-filter input')?.focus();
     });
+  }
+
+  // --------------------------------------------------- display-menu / popup
+
+  /** display-menu: resolves to the chosen item or null. Shortcut keys select directly. */
+  menu({ title = '', items, start = 0 }) {
+    return new Promise((resolve) => {
+      const entry = { kind: 'menu' };
+      const box = el('div', { class: 'ov-box ov-menu' });
+      if (title) box.append(el('div', { class: 'ov-head' }, title));
+      const body = el('div', { class: 'ov-body' });
+      box.append(body);
+      const selectable = items.map((it, i) => (!it.separator && !it.disabled ? i : -1)).filter((i) => i >= 0);
+      let sel = selectable[Math.max(0, Math.min(start, selectable.length - 1))] ?? -1;
+      let done = false;
+      const finish = (v) => { done = true; this.close(entry); resolve(v); };
+      const render = () => {
+        body.textContent = '';
+        items.forEach((it, i) => {
+          if (it.separator) { body.append(el('div', { class: 'sep' })); return; }
+          const row = el('div', { class: 'row' + (i === sel ? ' sel' : '') + (it.disabled ? ' disabled' : '') },
+            el('span', { class: 'label' }, it.label), it.key ? el('span', { class: 'key' }, `(${it.key})`) : null);
+          if (!it.disabled) {
+            row.addEventListener('mousedown', (e) => { e.preventDefault(); finish(it); });
+            row.addEventListener('mouseenter', () => { if (sel !== i) { sel = i; render(); } });
+          }
+          body.append(row);
+        });
+      };
+      const move = (d) => {
+        if (!selectable.length) return;
+        const k = selectable.indexOf(sel);
+        sel = selectable[(k + d + selectable.length) % selectable.length];
+        render();
+      };
+      entry.onKey = (e) => {
+        const key = eventToKey(e);
+        if (!key) return true;
+        e.preventDefault();
+        const hit = items.find((it) => !it.separator && !it.disabled && it.key === key);
+        if (hit) { finish(hit); return true; }
+        switch (key) {
+          case 'Escape': case 'C-c': case 'C-g': case 'q': finish(null); break;
+          case 'Up': case 'k': case 'C-p': case 'BTab': move(-1); break;
+          case 'Down': case 'j': case 'C-n': case 'Tab': move(1); break;
+          case 'Enter': if (sel >= 0) finish(items[sel]); break;
+        }
+        return true;
+      };
+      entry.cleanup = () => { if (!done) resolve(null); };
+      const area = this.paneBox(false);
+      Object.assign(box.style, { left: `${area.x + area.w / 2}px`, top: `${area.y + area.h / 2}px` });
+      this.root.appendChild(box);
+      entry.dom = box;
+      this.push(entry);
+      render();
+    });
+  }
+
+  /** display-popup: a floating frame (url) or text box. */
+  popup({ url = null, text = null, width, height, x, y, title = '' } = {}) {
+    this.closePopup();
+    const area = this.paneBox(true);
+    const cell = this.app.cell || { w: 8, h: 17 };
+    const dim = (v, total, c) => {
+      if (v == null || v === '') return total / 2;
+      const s = String(v);
+      const n = s.endsWith('%') ? (total * Number(s.slice(0, -1))) / 100 : Number(s) * c;
+      return Number.isFinite(n) && n > 0 ? Math.min(total, n) : total / 2;
+    };
+    const w = dim(width, area.w, cell.w);
+    const h = dim(height, area.h, cell.h);
+    const pos = (v, total, size, c) => {
+      const n = Number(v);
+      if (v != null && v !== 'C' && Number.isFinite(n)) return Math.max(0, Math.min(total - size, n * c));
+      return (total - size) / 2;
+    };
+    const entry = { kind: 'popup' };
+    const close = el('span', { class: 'ov-close', title: 'Close (Esc)' }, '×');
+    const head = el('div', { class: 'ov-head' }, title || url || 'popup', close);
+    const box = el('div', { class: 'ov-box ov-popup' }, head);
+    if (url != null && url !== '') {
+      box.append(el('iframe', { class: 'ov-frame', src: url, allow: 'clipboard-read; clipboard-write; fullscreen' }));
+    } else if (text != null) {
+      box.append(el('div', { class: 'ov-body' }, text));
+    } else {
+      const input = el('input', { type: 'text', spellcheck: 'false', placeholder: 'URL or search, Enter to open' });
+      const holder = el('div', { class: 'ov-filter' }, el('span', {}, 'url: '), input);
+      box.append(holder);
+      input.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' || !input.value.trim()) return;
+        e.preventDefault();
+        e.stopPropagation();
+        holder.replaceWith(el('iframe', { class: 'ov-frame', src: toPopupUrl(input.value, this.t) }));
+        this.app.keySink();
+      });
+      entry.refocus = () => input.focus();
+      setTimeout(() => input.focus(), 0);
+    }
+    this.place(box, { x: area.x + pos(x, area.w, w, cell.w), y: area.y + pos(y, area.h, h, cell.h), w, h });
+    this.root.appendChild(box);
+    entry.dom = box;
+    entry.onKey = (e) => {
+      const key = eventToKey(e);
+      if (key === 'Escape' || key === 'C-c') { e.preventDefault(); this.close(entry); return true; }
+      return document.activeElement?.tagName === 'INPUT' ? false : true;
+    };
+    close.addEventListener('mousedown', (e) => { e.preventDefault(); this.close(entry); });
+    this.popupEntry = entry;
+    entry.cleanup = () => { if (this.popupEntry === entry) this.popupEntry = null; };
+    this.push(entry);
+    if (entry.refocus) entry.refocus();
+  }
+
+  closePopup() {
+    if (this.popupEntry) this.close(this.popupEntry);
   }
 
   // ------------------------------------------------------------ choose-tree

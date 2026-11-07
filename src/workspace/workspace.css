@@ -111,6 +111,15 @@ html, body {
   background: var(--term-bg);
 }
 .pane.hidden { visibility: hidden; pointer-events: none; }
+/* select-pane -m: tmux draws the marked pane's border in reverse; a dashed outline reads the same. */
+.pane.marked::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 2px dashed var(--border-active);
+  pointer-events: none;
+  z-index: 2;
+}
 .pane .frame {
   position: absolute;
   inset: 0;
@@ -240,6 +249,26 @@ html, body {
   white-space: pre;
   overflow: hidden;
 }
+
+/* display-menu */
+.ov-box.ov-menu {
+  transform: translate(-50%, -50%);
+  max-height: 90%;
+  min-width: 12em;
+  z-index: 30;
+}
+.ov-menu .ov-head { text-align: center; }
+.ov-menu .row { display: flex; gap: 2em; justify-content: space-between; cursor: default; }
+.ov-menu .row.disabled { opacity: 0.45; }
+.ov-menu .row .key { opacity: 0.8; }
+.ov-menu .sep { border-top: 1px solid var(--border); margin: 2px 0; }
+
+/* display-popup */
+.ov-box.ov-popup { z-index: 25; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5); }
+.ov-popup .ov-head { display: flex; justify-content: space-between; }
+.ov-popup .ov-close { cursor: pointer; padding: 0 4px; }
+.ov-popup .ov-frame { flex: 1 1 auto; border: 0; width: 100%; background: #fff; }
+.ov-popup .ov-body { padding: 0 6px; }
 
 .pane-number {
   position: absolute;

@@ -69,6 +69,9 @@ class Workspace {
     await this.tpm.loadMetaCache();
 
     t.server.addEventListener('change', (e) => this.onChange(e.detail));
+    // Startup hooks, in tmux's order: the session is created, then the client attaches.
+    if (!hadLiveState) await t.fireHook('session-created');
+    await t.fireHook('client-attached');
     this.installListeners();
     this.publishRuntime();
     this.render();
@@ -134,6 +137,13 @@ class Workspace {
       detach: () => self.detach(),
       refresh: () => { self.applyTheme(); self.render(); },
       writeClipboard: (text) => self.writeClipboard(text),
+      readClipboard: async () => { try { return await navigator.clipboard.readText(); } catch { return ''; } },
+      menu: (opts) => self.overlays.menu(opts),
+      popup: (opts) => self.overlays.popup(opts),
+      closePopup: () => self.overlays.closePopup(),
+      promptHistory: () => self.overlays.promptHistory.slice(),
+      clearPromptHistory: () => { self.overlays.promptHistory = []; },
+      render: () => self.scheduleRender(),
       openTab: (url) => chrome.tabs.create({ url, index: undefined, active: true }),
       serverEmpty: () => self.serverEmpty(),
       setKeyTable: (name) => self.setKeyTable(name),
@@ -261,8 +271,13 @@ class Workspace {
     const loc = srv.locate(paneId);
     if (!loc || loc.session !== srv.session || loc.window !== srv.window) return;
     if (loc.window.active === paneId) return;
+    const prev = loc.window.active;
     srv.selectPane(loc.window, paneId);
     srv.changed('focus');
+    // Mouse focus doesn't go through a command, so fire the focus hooks here.
+    this.t.fireHook('pane-focus-out', { session: loc.session, window: loc.window, pane: prev })
+      .then(() => this.t.fireHook('window-pane-changed', { session: loc.session, window: loc.window, pane: paneId }))
+      .then(() => this.t.fireHook('pane-focus-in', { session: loc.session, window: loc.window, pane: paneId }));
   }
 
   // ----------------------------------------------------------------- input
@@ -471,7 +486,8 @@ class Workspace {
     const s = this.t.server.session;
     this.overlays.closeAll();
     this.keySink();
-    this.overlays.detached(s?.name ?? '', () => { this.render(); this.focusPane(); });
+    this.t.fireHook('client-detached');
+    this.overlays.detached(s?.name ?? '', () => { this.render(); this.focusPane(); this.t.fireHook('client-attached'); });
   }
 
   serverEmpty() {

@@ -38,16 +38,19 @@ A new pane starts as a prompt: type a URL, search terms, or `:command` for any t
 
 | Area | Supported |
 |---|---|
-| Config syntax | quoting rules, `\` continuations, `;` and `\;`, `{ }` blocks, `NAME=value` and `$NAME`/`${NAME}`, `%if/%elif/%else/%endif`, `%hidden`, `source-file`, deprecated `*-fg/-bg/-attr` options |
+| Config syntax | quoting rules, `\` continuations, `;` and `\;`, `{ }` blocks, `NAME=value` and `$NAME`/`${NAME}`, `%if/%elif/%else/%endif`, `%hidden`, `source-file`, deprecated `*-fg/-bg/-attr` options, array options (`command-alias[N]`, `terminal-overrides`, `status-format[N]`, `set -a` appends) |
+| Shell | `if-shell`, `run-shell` and `display-popup` run a small built-in shell (see [Shell commands](#shell-commands)), so version checks, `[ … ]` tests and `tmux set/bind/show …` calls work |
+| Hooks | `set-hook [-a/-u/-R]` with array indexes, `show-hooks`; `after-<command>` and session/window/pane events actually fire (`session-created`, `window-linked`, `window-renamed`, `client-session-changed`, `pane-focus-in/out`, `window-layout-changed`, `client-attached`, …) with `#{hook_*}` formats |
 | Keys | `prefix`/`prefix2`, prefix/root/custom tables (`bind -n`, `-T`, `switch-client -T`), repeat (`-r`, `repeat-time`), `unbind [-a]` |
-| Panes | `split-window [-h/-v/-b/-f/-l/-p/-c]`, `select-pane -L/R/U/D/-l/-t`, `resize-pane` (keys, `-x/-y`, `-Z` zoom, mouse-drag borders), `swap-pane`, `rotate-window`, `break-pane`, `join-pane`, `kill-pane`, `display-panes`, `pane-border-status` |
+| Panes | `split-window [-h/-v/-b/-f/-l/-p/-c]`, `select-pane -L/R/U/D/-l/-t`, marked panes (`select-pane -m/-M`, `prefix m/M`, `~`/`{marked}` targets, the `M` window flag, default source for `join-pane`/`swap-pane`/`swap-window`), `resize-pane` (keys, `-x/-y`, `-Z` zoom, mouse-drag borders), `swap-pane`, `rotate-window`, `break-pane`, `join-pane`, `kill-pane`, `display-panes`, `pane-border-status` |
 | Windows | `new-window`, `select-window`, `next/previous/last-window`, `rename-window`, `swap-window`, `move-window`, `kill-window`, `base-index`, `renumber-windows`, `automatic-rename` (uses the site hostname) |
 | Layouts | `even-horizontal`, `even-vertical`, `main-horizontal`, `main-vertical`, `tiled`, `next-layout`, `select-layout -E/-o` |
 | Sessions | `new-session`, `rename-session`, `switch-client -n/-p/-l/-t`, `kill-session`, `detach-client`; `prefix s` / `prefix w` (choose-tree) is a session manager: `Enter` switch, `(0)`–`(9)` shortcuts, `n` new session, `c` new window, `$` / `,` rename session/window, `x` kill, `h/l` fold, `/` filter |
-| Status line | `status-left/right` (with `-length`/`-style`), `window-status-*format/style`, `status-justify`, `status-position`, `status-interval`, `message-style`, full `#{}` format language, `#[]` styles, 256/hex colours, strftime. Powerline glyphs are drawn with CSS, so no patched font is needed |
-| Modes | `command-prompt` (`-p/-I/-1`, history, Tab completion), `confirm-before`, `display-message`, `list-keys [-N]`, `show-options`, `show-messages`, `clock-mode`, `choose-buffer`, `find-window` |
+| Status line | `status-left/right` (with `-length`/`-style`), `window-status-*format/style`, `status-justify`, `status-position`, `status-interval`, `message-style`, full `#{}` format language (including `#{S:}`/`#{W:}`/`#{P:}` loops, `#{N/w:}`, `#{!:}`, `#{a:}`, `#{c:}`, `#{w:}`, any option name as a variable, `client_width`, `pane_at_left`, …), `#[]` styles, 256/hex colours, strftime. Powerline glyphs are drawn with CSS, so no patched font is needed |
+| Modes | `command-prompt` (`-p/-I/-1`, history, Tab completion), `confirm-before`, `display-menu` (shortcut keys, disabled items, separators; `prefix <` / `>` window and pane menus), `display-popup` (a URL opens in a floating frame), `display-message`, `list-keys [-N]`, `show-options`, `show-messages`, `clock-mode`, `choose-buffer`, `find-window` |
 | Copy mode | `copy-mode-vi` / `copy-mode` tables from your config. The page caret is the cursor, moved with the DOM Selection API (`h j k l w b e 0 $ g G H M L C-u C-d …`), with `/ ? n N` search, `Space`/`V` selection and `Enter`/`y` to copy to the clipboard and a paste buffer |
-| Web | `goto`/`open <url>`, `back`, `forward`, `reload`, `open-in-tab`, `paste-buffer`, `send-keys` (text) |
+| Web | `goto`/`open <url>`, `back`, `forward`, `reload`, `open-in-tab`, `paste-buffer`, `send-keys` (text), `capture-pane` (the page's text) |
+| Other commands | every tmux 3.4 command name resolves. `wait-for` (`-S/-L/-U`), `save-buffer` (to the clipboard), `load-buffer`, `set-buffer -n`, `list-clients`, `command-alias`; terminal-only ones (`pipe-pane`, `resize-window`, `start-server`, …) are accepted and do nothing |
 
 Extra default bindings, for things a browser needs: `prefix g` opens a URL in the pane,
 `prefix B` goes back, `prefix T` opens the pane in a real Chrome tab.
@@ -95,9 +98,35 @@ fetch each plugin's metadata from the GitHub API (cached for 24h) for the debug 
 | `tmux-plugins/tmux-online-status` | `#{online_status}` |
 
 Unknown plugins are listed in the debug panel (`prefix ~`, Plugins tab) together with
-the `@options` they would have used. So are config lines that need a shell:
-`#()`, `run-shell`, and `if-shell` (which is evaluated as false, so the else-branch runs;
-`if -F` works).
+the `@options` they would have used. So are config lines whose shell commands are outside
+the built-in shell below, and `#()` in formats.
+
+### Shell commands
+
+There is no `/bin/sh` in a browser, but the shell snippets in real configs and plugins
+are a small, familiar set. `if-shell`, `run-shell` and `display-popup` run them with a
+built-in POSIX-shell subset (`src/core/shell.js`):
+
+- `;`, `&&`, `||`, `|`, `!`, quoting, `$VAR`/`${VAR:-x}`, `$(…)` and backticks, `>/dev/null 2>&1`
+- `tmux …` runs the tmux command in this engine, and its output can be captured:
+  `$(tmux show -gqv @opt)`, `tmux display -p '#{…}'`, `tmux -V` (prints `tmux 3.4`)
+- `test`/`[ ]`/`[[ ]]`, `echo`, `printf`, `true`/`false`, `uname` (your OS), `command -v`/`which`,
+  `cut`, `grep`, `sed s///`, `tr`, `awk '{print $N}'`, `bc` comparisons, `head`, `tail`, `wc`, `sort`, `sh -c`
+- `$TMUX` and `$TMUX_PANE` are set, as inside real tmux
+
+So the usual idioms work:
+
+```tmux
+run-shell 'tmux setenv -g TMUX_VERSION $(tmux -V | cut -c 6-)'
+if-shell -b '[ "$(echo "$TMUX_VERSION >= 2.1" | bc)" = 1 ]' 'set -g mouse on'
+if-shell 'test "$(uname)" = "Darwin"' 'set -g default-command "reattach-to-user-namespace -l $SHELL"'
+bind f display-popup -E "tmux new -A -s scratch"        # the scratch-session popup
+bind D display-popup -w 80% -h 80% https://devdocs.io   # a URL opens in the popup
+```
+
+File tests (`[ -f ~/.tmux.local ]`) are false, since there is no file system. Anything
+else (`ps`, `if … fi`, unknown programs) makes the whole command fall back to the old
+behaviour: the condition is false and the debug panel says why.
 
 ## How it works
 
@@ -116,7 +145,8 @@ src/
     layout.js                    split tree: geometry, navigation, resize, preset layouts
     server.js                    sessions → windows → panes, snapshots
     target.js                    -t target resolution (session:window.pane, %id, {last}, …)
-    commands.js                  74 tmux commands (+ aliases)
+    commands.js                  91 tmux commands (+ aliases)
+    shell.js                     POSIX-shell subset for if-shell / run-shell / display-popup
     defaults.js                  tmux 3.4 default options and key tables
     tmux.js                      engine: options, key tables, sourcing, dispatch
   tpm/tpm.js, tpm/plugins/*      TPM emulation layer + plugin emulators

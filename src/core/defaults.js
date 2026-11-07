@@ -71,7 +71,38 @@ export const DEFAULT_OPTIONS = {
   '@ctmux-background': '#121212',
   '@ctmux-foreground': '#d0d0d0',
   '@ctmux-launcher-motd': 'on',
+
+  // Array options (tmux 3.4 defaults).
+  'command-alias[0]': 'split-pane=split-window',
+  'command-alias[1]': 'splitp=split-window',
+  'command-alias[2]': 'server-info=show-messages -JT',
+  'command-alias[3]': 'info=show-messages -JT',
+  'command-alias[4]': 'choose-window=choose-tree -w',
+  'command-alias[5]': 'choose-session=choose-tree -s',
 };
+
+/**
+ * Array options (`name[N]`) and the separator tmux uses to split a value set
+ * without an index (null: the whole value is one element).
+ */
+export const ARRAY_OPTIONS = {
+  'command-alias': ',', 'terminal-overrides': ',', 'terminal-features': ',', 'update-environment': ' ',
+  'status-format': null, 'user-keys': ',', 'pane-colours': ' ',
+};
+
+/** Hooks this implementation fires (besides after-<command>). */
+export const EVENT_HOOKS = new Set([
+  'client-attached', 'client-detached', 'client-session-changed', 'client-focus-in', 'client-focus-out',
+  'session-created', 'session-closed', 'session-renamed', 'session-window-changed',
+  'window-linked', 'window-unlinked', 'window-renamed', 'window-layout-changed', 'window-pane-changed',
+  'pane-focus-in', 'pane-focus-out', 'pane-mode-changed', 'pane-title-changed',
+]);
+
+/** Hooks tmux has but that never fire here (no processes, alerts or resizes). */
+export const KNOWN_UNFIRED_HOOKS = new Set([
+  'alert-activity', 'alert-bell', 'alert-silence', 'client-resized', 'client-active', 'client-light-theme',
+  'client-dark-theme', 'command-error', 'pane-died', 'pane-exited', 'pane-set-clipboard', 'session-closed-all',
+]);
 
 /** Options whose values are on/off flags. */
 export const FLAG_OPTIONS = new Set([
@@ -142,6 +173,11 @@ bind -N 'Zoom the active pane' z resize-pane -Z
 bind -N 'Swap the active pane with the pane above' '{' swap-pane -U
 bind -N 'Swap the active pane with the pane below' '}' swap-pane -D
 bind -N 'Show messages' '~' show-messages
+bind -N 'Toggle the marked pane' m select-pane -m
+bind -N 'Clear the marked pane' M select-pane -M
+bind -N 'Spread panes out evenly' E select-layout -E
+bind -N 'Display window menu' < display-menu -T "#[align=centre]#{window_index}:#{window_name}" -x W -y W "Swap Left" l { swap-window -t:-1 } "Swap Right" r { swap-window -t:+1 } "#{?pane_marked_set,,-}Swap Marked" s { swap-window } '' Kill X { kill-window } Respawn R { respawn-window -k } "#{?pane_marked,Unmark,Mark}" m { select-pane -m } Rename n { command-prompt -FI "#W" { rename-window -t '#{window_id}' -- '%%' } } '' "New After" w { new-window -a } "New At End" W { new-window }
+bind -N 'Display pane menu' > display-menu -T "#[align=centre]#{pane_index} (#{pane_id})" -x P -y P "Horizontal Split" h { split-window -h } "Vertical Split" v { split-window -v } '' "#{?#{>:#{window_panes},1},,-}Swap Up" u { swap-pane -U } "#{?#{>:#{window_panes},1},,-}Swap Down" d { swap-pane -D } "#{?pane_marked_set,,-}Swap Marked" s { swap-pane } '' Kill X { kill-pane } Respawn R { respawn-pane -k } "#{?pane_marked,Unmark,Mark}" m { select-pane -m } "#{?#{>:#{window_panes},1},,-}#{?window_zoomed_flag,Unzoom,Zoom}" z { resize-pane -Z }
 bind -N 'Enter copy mode and scroll up' PPage copy-mode -u
 bind -N 'Select the pane above the active pane' -r Up select-pane -U
 bind -N 'Select the pane below the active pane' -r Down select-pane -D

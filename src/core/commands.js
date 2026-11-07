@@ -5,7 +5,7 @@
 import * as L from './layout.js';
 import { resolveTarget } from './target.js';
 import { toCommandList, argToString, quoteArg, formatCommandList } from './parser.js';
-import { DEFAULT_OPTIONS, FLAG_OPTIONS } from './defaults.js';
+import { DEFAULT_OPTIONS, FLAG_OPTIONS, ARRAY_OPTIONS, EVENT_HOOKS as EVENT_HOOK_NAMES, KNOWN_UNFIRED_HOOKS } from './defaults.js';
 import { paneShortName } from './server.js';
 
 export const COMMANDS = new Map();
@@ -33,6 +33,8 @@ function target(t, spec, kind, ctx) {
   if (!r) throw new Error(`can't find ${kind}: ${spec}`);
   return r;
 }
+
+const truthyFmt = (v) => v !== '' && v !== '0';
 
 const isFlag = (v) => ['on', 'yes', '1', 'true'].includes(String(v).toLowerCase());
 
@@ -122,6 +124,9 @@ function setOptionCmd(t, f, a, ctx) {
     t.setOption(styleName, cur && cur !== 'default' ? `${cur},${part}` : part, origin);
     return;
   }
+  // Array options: command-alias[N], terminal-overrides, status-format[N], ...
+  const arr = /^(.+?)(?:\[(\d+)\])?$/.exec(name);
+  if (arr && arr[1] in ARRAY_OPTIONS) return setArrayOption(t, f, arr[1], arr[2], value, origin);
   // message-command-fg etc. map onto *-style too.
   if (f.u || f.U) {
     if (name in DEFAULT_OPTIONS) t.setOption(name, DEFAULT_OPTIONS[name], 'default');
@@ -145,14 +150,46 @@ function setOptionCmd(t, f, a, ctx) {
   t.ui.optionChanged?.(name);
 }
 
+function setArrayOption(t, f, base, index, value, origin) {
+  const keys = () => t.arrayOption(base).map(([i]) => `${base}[${i}]`);
+  if (f.u || f.U) {
+    if (index != null) { delete t.options[`${base}[${index}]`]; return; }
+    keys().forEach((k) => delete t.options[k]);
+    for (const [k, v] of Object.entries(DEFAULT_OPTIONS)) if (k.startsWith(base + '[')) t.setOption(k, v, 'default');
+    return;
+  }
+  if (value === undefined) throw new Error(`${base}: missing value`);
+  if (f.F) value = t.expandPlain(value);
+  if (index != null) {
+    const k = `${base}[${index}]`;
+    if (f.o && k in t.options) return;
+    t.setOption(k, f.a ? (t.options[k] ?? '') + value : value, origin);
+  } else {
+    const sep = ARRAY_OPTIONS[base];
+    const items = sep == null ? [value] : value.split(sep === ' ' ? /\s+/ : sep).filter((x) => x !== '');
+    if (!f.a) keys().forEach((k) => delete t.options[k]);
+    let next = t.arrayOption(base).reduce((m, [i]) => Math.max(m, i + 1), 0);
+    for (const item of items) t.setOption(`${base}[${next++}]`, item, origin);
+  }
+  t.ui.optionChanged?.(base);
+}
+
 def('set-option', 'set', 'aFgopqst:uUw', setOptionCmd);
 def('set-window-option', 'setw', 'aFgoqt:uU', setOptionCmd);
 
-def('show-options', ['show', 'show-window-options', 'showw'], 'AgHpqst:vw', (t, f, a) => {
-  const names = a.length ? [argToString(a[0])] : Object.keys(t.options).sort();
-  const lines = names.filter((n) => n in t.options).map((n) => (f.v ? t.options[n] : `${n} ${quoteArg(t.options[n])}`));
-  if (a.length) t.ui.message(lines[0] ?? (f.q ? '' : `invalid option: ${a[0]}`));
-  else t.ui.showList({ title: 'show-options', lines });
+def('show-options', ['show', 'show-window-options', 'showw'], 'AgHpqst:vw', (t, f, a, ctx) => {
+  const want = a.length ? argToString(a[0]) : null;
+  let names = Object.keys(t.options).sort();
+  if (want != null) {
+    names = want in ARRAY_OPTIONS && !(want in t.options)
+      ? t.arrayOption(want).map(([i]) => `${want}[${i}]`)
+      : [want].filter((n) => n in t.options);
+    if (!names.length && !f.q) throw new Error(`invalid option: ${want}`);
+  }
+  const lines = names.map((n) => (f.v ? t.options[n] : `${n} ${quoteArg(t.options[n])}`));
+  if (ctx.print) { lines.forEach((l) => ctx.print(l)); return; }
+  if (want != null) { if (lines.length) t.ui.message(lines.join(' ')); return; }
+  t.ui.showList({ title: 'show-options', lines });
 });
 
 def('set-environment', 'setenv', 'Fhgrt:u', (t, f, a) => {
@@ -162,15 +199,45 @@ def('set-environment', 'setenv', 'Fhgrt:u', (t, f, a) => {
   else t.env[name] = f.F ? t.expandPlain(value ?? '') : value ?? '';
 });
 
-def('show-environment', 'showenv', 'hgst:', (t) => {
-  t.ui.showList({ title: 'show-environment', lines: Object.entries(t.env).map(([k, v]) => `${k}=${v}`) });
+def('show-environment', 'showenv', 'hgst:', (t, f, a, ctx) => {
+  const want = a.length ? argToString(a[0]) : null;
+  if (want != null && !(want in t.env)) throw new Error(`unknown variable: ${want}`);
+  const entries = want != null ? [[want, t.env[want]]] : Object.entries(t.env);
+  t.output(ctx, entries.map(([k, v]) => `${k}=${v}`), 'show-environment');
 });
 
-def('set-hook', null, 'agpRt:uw', (t, f, a, ctx) => {
-  const [name, ...rest] = a;
-  if (!name) return;
-  t.hooks[argToString(name)] = rest.length ? toCommandList(rest.length === 1 ? rest[0] : rest, t.env) : null;
-  t.notice(`set-hook ${name}: hooks are stored but only client-attached/after-* hooks run`, { source: ctx.source, line: ctx.line, level: 'info' });
+def('set-hook', null, 'agpRt:uw', async (t, f, a, ctx) => {
+  const [rawName, ...rest] = a;
+  if (rawName == null) throw new Error('missing hook name');
+  const m = /^(.+?)(?:\[(\d+)\])?$/.exec(argToString(rawName));
+  const name = m[1];
+  const index = m[2] != null ? Number(m[2]) : null;
+  if (!/^after-/.test(name) && !EVENT_HOOK_NAMES.has(name)) {
+    if (!KNOWN_UNFIRED_HOOKS.has(name)) throw new Error(`invalid hook: ${name}`);
+    t.notice(`set-hook ${name}: this event never happens in the browser, so the hook won't run`, { source: ctx.source, line: ctx.line, level: 'info', key: 'hook:' + name });
+  }
+  if (f.R) { await t.fireHook(name, ctx); return; }
+  const list = (t.hooks[name] ||= []);
+  if (f.u) {
+    if (index != null) delete list[index];
+    else delete t.hooks[name];
+    return;
+  }
+  if (!rest.length) throw new Error('missing command');
+  const commands = toCommandList(rest.length === 1 ? rest[0] : rest, t.env);
+  if (index != null) list[index] = commands;
+  else if (f.a) list[list.length] = commands;
+  else { list.length = 0; list[0] = commands; }
+});
+
+def('show-hooks', null, 'gpt:w', (t, f, a, ctx) => {
+  const want = a.length ? argToString(a[0]) : null;
+  const lines = [];
+  for (const name of Object.keys(t.hooks).sort()) {
+    if (want && name !== want) continue;
+    t.hooks[name].forEach((cmds, i) => { if (cmds) lines.push(`${name}[${i}] ${formatCommandList(cmds)}`); });
+  }
+  t.output(ctx, lines, 'show-hooks');
 });
 
 // ---------------------------------------------------------- key bindings
@@ -197,7 +264,7 @@ def('unbind-key', 'unbind', 'anqT:', (t, f, a) => {
   t.ui.keysChanged?.();
 });
 
-def('list-keys', 'lsk', '1aNP:T:', (t, f, a) => {
+def('list-keys', 'lsk', '1aNP:T:', (t, f, a, ctx) => {
   const lines = [];
   const tables = f.T ? [f.T] : [...t.tables.keys()].sort((x, y) => (x === 'prefix' ? -1 : y === 'prefix' ? 1 : x.localeCompare(y)));
   const prefix = t.getOption('prefix');
@@ -215,6 +282,7 @@ def('list-keys', 'lsk', '1aNP:T:', (t, f, a) => {
       }
     }
   }
+  if (ctx.print) { lines.forEach((l) => ctx.print(l)); return; }
   t.ui.showList({ title: f.N ? 'Key bindings' : 'list-keys', lines, filterable: true });
 });
 
@@ -258,11 +326,27 @@ def('source-file', 'source', 'Fnqv', async (t, f, a, ctx) => {
 });
 
 def('run-shell', 'run', 'bCd:t:Es:c:', async (t, f, a, ctx) => {
-  const cmd = argToString(a[0] ?? '');
+  let cmd = argToString(a[0] ?? '');
   if (f.C) return t.runString(cmd, ctx);
+  if (f.d != null) { const ms = Number(f.d) * 1000; if (ms > 0 && !ctx.fromConfig) await new Promise((r) => setTimeout(r, Math.min(ms, 10000))); }
+  if (!cmd) return;
   if (await t.plugins?.handleRun(cmd, ctx)) return;
-  t.notice(`run-shell "${cmd}": shell commands can't run in the browser`, { source: ctx.source, line: ctx.line, level: 'info' });
+  cmd = t.expandPlain(cmd, ctx);
+  const r = await t.shell(cmd, ctx);
+  if (!r) {
+    t.notice(`run-shell "${short(cmd)}": shell commands can't run in the browser`, { source: ctx.source, line: ctx.line, level: 'info' });
+    return;
+  }
+  const out = r.out.replace(/\n$/, '');
+  if (out) {
+    if (ctx.print) out.split('\n').forEach((l) => ctx.print(l));
+    else if (ctx.fromConfig) t.log(`run-shell: ${out}`);
+    else if (!f.b) t.ui.showList({ title: 'run-shell', lines: out.split('\n') });
+  }
+  if (r.code !== 0 && !ctx.fromConfig && !f.b) t.ui.message(`'${short(cmd)}' returned ${r.code}`);
 });
+
+const short = (c) => (c.length > 50 ? c.slice(0, 47) + '...' : c);
 
 def('if-shell', 'if', 'bFt:', async (t, f, a, ctx) => {
   const [cond, then, otherwise] = a;
@@ -271,11 +355,15 @@ def('if-shell', 'if', 'bFt:', async (t, f, a, ctx) => {
     const v = t.expandPlain(argToString(cond), ctx);
     ok = v !== '' && v !== '0';
   } else {
-    const c = argToString(cond);
-    ok = t.plugins?.evalShell?.(c) ?? false;
-    t.notice(`if-shell "${c.length > 50 ? c.slice(0, 47) + '...' : c}": shell condition treated as false`, {
-      source: ctx.source, line: ctx.line, level: 'info', key: 'if-shell:' + c,
-    });
+    const c = t.expandPlain(argToString(cond), ctx);
+    const r = await t.shell(c, ctx);
+    if (r) ok = r.code === 0;
+    else {
+      ok = false;
+      t.notice(`if-shell "${short(c)}": shell condition treated as false`, {
+        source: ctx.source, line: ctx.line, level: 'info', key: 'if-shell:' + c,
+      });
+    }
   }
   const branch = ok ? then : otherwise;
   if (branch == null) return;
@@ -361,7 +449,7 @@ def('kill-window', 'killw', 'at:', (t, f, a, ctx) => {
 });
 
 def('swap-window', 'swapw', 'ds:t:', (t, f, a, ctx) => {
-  const src = target(t, f.s, 'window', ctx);
+  const src = target(t, f.s ?? (t.server.markedPane() != null ? '{marked}' : undefined), 'window', ctx);
   const dst = target(t, f.t, 'window', ctx);
   if (src.window === dst.window) return;
   if (src.session !== dst.session) throw new Error('windows must be in the same session');
@@ -490,7 +578,13 @@ def('select-pane', 'selectp', 'DdegLlMmP:RT:t:UZ', (t, f, a, ctx) => {
     p.manualTitle = true;
     return;
   }
-  if (f.m || f.M || f.e || f.d || f.P || f.g) return; // marking / input / style: not applicable
+  if (f.M) { srv.marked = null; t.ui.render?.(); return; }
+  if (f.m) {
+    srv.marked = srv.markedPane() === r.pane ? null : r.pane;
+    t.ui.render?.();
+    return;
+  }
+  if (f.e || f.d || f.P || f.g) return; // input / style: not applicable
   const dir = f.L ? 'L' : f.R ? 'R' : f.U ? 'U' : f.D ? 'D' : null;
   if (dir) {
     const w = r.window;
@@ -563,7 +657,7 @@ def('swap-pane', 'swapp', 'dDs:t:UZ', (t, f, a, ctx) => {
     const other = ids[(i + (f.U ? -1 : 1) + ids.length) % ids.length];
     src = { window: w, pane: other };
   } else {
-    src = target(t, f.s ?? '{last}', 'pane', ctx);
+    src = target(t, f.s ?? (t.server.markedPane() != null ? '{marked}' : '{last}'), 'pane', ctx);
   }
   if (src.pane == null || src.pane === dst.pane) return;
   if (src.window === w) {
@@ -590,8 +684,8 @@ def('break-pane', 'breakp', 'abdPF:n:s:t:', (t, f, a, ctx) => {
 });
 
 def('join-pane', ['joinp', 'move-pane', 'movep'], 'bdfhvl:p:s:t:', (t, f, a, ctx) => {
-  if (f.s == null) throw new Error('no source pane (marked panes are not supported; use -s)');
-  const src = target(t, f.s, 'pane', ctx);
+  if (f.s == null && t.server.markedPane() == null) throw new Error('no marked pane (mark one with select-pane -m, or use -s)');
+  const src = target(t, f.s ?? '{marked}', 'pane', ctx);
   const dst = target(t, f.t, 'pane', ctx);
   if (src.window === dst.window) throw new Error('source and target are in the same window');
   const size = f.p != null ? Number(f.p) / 100 : (f.l && String(f.l).endsWith('%') ? Number(String(f.l).slice(0, -1)) / 100 : undefined);
@@ -664,24 +758,39 @@ def('kill-server', null, '', (t) => {
 
 def('has-session', 'has', 't:', (t, f, a, ctx) => { target(t, f.t, 'session', ctx); });
 
-def('list-sessions', 'ls', 'F:f:', (t, f) => {
+def('list-sessions', 'ls', 'F:f:', (t, f, a, ctx) => {
   const fmt = f.F || '#{session_name}: #{session_windows} windows (created #{t:session_created})#{?session_attached, (attached),}';
-  t.ui.showList({ title: 'list-sessions', lines: t.server.sessions.map((s) => t.expandPlain(fmt, { session: s })) });
+  const keep = (c) => !f.f || truthyFmt(t.expandPlain(f.f, c));
+  t.output(ctx, t.server.sessions.filter((s) => keep({ session: s })).map((s) => t.expandPlain(fmt, { session: s })), 'list-sessions');
 });
 
 def('list-windows', 'lsw', 'aF:f:t:', (t, f, a, ctx) => {
   const sessions = f.a ? t.server.sessions : [target(t, f.t, 'session', ctx).session];
   const fmt = f.F || (f.a ? '#{session_name}:' : '') + '#{window_index}: #{window_name}#{window_flags} (#{window_panes} panes)';
   const lines = [];
-  for (const s of sessions) for (const w of t.server.sortedWindows(s)) lines.push(t.expandPlain(fmt, { session: s, window: w }));
-  t.ui.showList({ title: 'list-windows', lines });
+  for (const s of sessions) {
+    for (const w of t.server.sortedWindows(s)) {
+      if (f.f && !truthyFmt(t.expandPlain(f.f, { session: s, window: w }))) continue;
+      lines.push(t.expandPlain(fmt, { session: s, window: w }));
+    }
+  }
+  t.output(ctx, lines, 'list-windows');
 });
 
 def('list-panes', 'lsp', 'asF:f:t:', (t, f, a, ctx) => {
   const r = target(t, f.t, 'window', ctx);
   const fmt = f.F || '#{pane_index}: #{pane_title} #{pane_current_path}#{?pane_active, (active),}';
-  const lines = L.panesInOrder(r.window.layout).map((id) => t.expandPlain(fmt, { session: r.session, window: r.window, pane: id }));
-  t.ui.showList({ title: 'list-panes', lines });
+  const wins = f.a ? t.server.sessions.flatMap((s) => t.server.sortedWindows(s).map((w) => [s, w]))
+    : f.s ? t.server.sortedWindows(r.session).map((w) => [r.session, w]) : [[r.session, r.window]];
+  const lines = [];
+  for (const [session, window] of wins) {
+    for (const id of L.panesInOrder(window.layout)) {
+      const c = { session, window, pane: id };
+      if (f.f && !truthyFmt(t.expandPlain(f.f, c))) continue;
+      lines.push(t.expandPlain(fmt, c));
+    }
+  }
+  t.output(ctx, lines, 'list-panes');
 });
 
 def('choose-tree', ['choose-window', 'choose-session'], 'F:f:GK:NO:rst:wyZ', (t, f, a, ctx) => {
@@ -706,12 +815,13 @@ def('display-message', 'display', 'aCc:d:INpt:F:lv', (t, f, a, ctx) => {
     const names = ['session_name', 'session_id', 'window_index', 'window_name', 'window_flags', 'window_panes',
       'pane_index', 'pane_id', 'pane_title', 'pane_current_path', 'pane_current_command', 'client_prefix', 'host', 'version'];
     const lookup = t.lookup(fctx);
-    t.ui.showList({ title: 'display-message -a', lines: names.map((n) => `${n}=${lookup(n) ?? ''}`) });
+    t.output(ctx, names.map((n) => `${n}=${lookup(n) ?? ''}`), 'display-message -a');
     return;
   }
   const fmt = a.length ? argToString(a[0])
     : f.F || '[#{session_name}] #{window_index}:#{window_name}, current pane #{pane_index} - (%H:%M %d-%b-%y)';
   const text = f.l ? fmt : t.expandPlain(fmt, fctx, { time: true });
+  if (ctx.print && (f.p || ctx.fromShell)) { ctx.print(text); return; }
   t.ui.message(text, { duration: f.d != null ? Number(f.d) : undefined });
 });
 
@@ -785,8 +895,10 @@ def('send-prefix', null, '2t:', (t) => {
 
 def('set-buffer', 'setb', 'aAb:n:t:w', (t, f, a) => {
   const data = argToString(a[0] ?? '');
-  if (f.a && t.buffers.length) t.buffers[0].data += data;
-  else t.buffers.unshift({ name: f.b || `buffer${String(t.buffers.length).padStart(4, '0')}`, data, time: Date.now() });
+  const existing = f.b ? t.buffers.find((x) => x.name === f.b) : t.buffers[0];
+  if (f.n) { if (!existing) throw new Error('no buffer'); existing.name = f.n; return; }
+  if (f.a && existing) existing.data += data;
+  else pushBuffer(t, data, f.b);
   if (f.w) t.ui.writeClipboard?.(data);
 });
 
@@ -795,17 +907,14 @@ def('delete-buffer', 'deleteb', 'b:', (t, f) => {
   else t.buffers.shift();
 });
 
-def('list-buffers', 'lsb', 'F:f:', (t) => {
-  t.ui.showList({
-    title: 'list-buffers',
-    lines: t.buffers.map((b) => `${b.name}: ${b.data.length} bytes: "${b.data.slice(0, 50).replace(/\n/g, '\\n')}"`),
-  });
+def('list-buffers', 'lsb', 'F:f:', (t, f, a, ctx) => {
+  t.output(ctx, t.buffers.map((b) => `${b.name}: ${b.data.length} bytes: "${b.data.slice(0, 50).replace(/\n/g, '\\n')}"`), 'list-buffers');
 });
 
-def('show-buffer', 'showb', 'b:', (t, f) => {
+def('show-buffer', 'showb', 'b:', (t, f, a, ctx) => {
   const b = f.b ? t.buffers.find((x) => x.name === f.b) : t.buffers[0];
   if (!b) throw new Error('no buffers');
-  t.ui.showList({ title: b.name, lines: b.data.split('\n') });
+  t.output(ctx, b.data.split('\n'), b.name);
 });
 
 def('paste-buffer', 'pasteb', 'b:dprs:t:', async (t, f, a, ctx) => {
@@ -827,6 +936,201 @@ def('choose-buffer', null, 'F:f:K:NO:rt:yZ', async (t, f, a, ctx) => {
   const r = target(t, f.t, 'pane', ctx);
   await t.ui.paneCommand?.(r.pane, { type: 'paste', text: b.data });
 });
+
+
+// ------------------------------------------------------- menus / popups
+
+/** Turn a menu item command (string or { block }) into a command string with formats expanded. */
+function menuCommand(t, cmd, fctx) {
+  let str = cmd == null ? '' : (typeof cmd === 'string' ? cmd : cmd.text ?? argToString(cmd));
+  // Bindings store `{ ... }` blocks as text; unwrap them like command-prompt does.
+  str = str.replace(/^\{\s*(.*?)\s*\}$/s, '$1');
+  return t.expandPlain(str, fctx);
+}
+
+def('display-menu', 'menu', 'b:c:C:H:MOs:S:t:T:x:y:', async (t, f, a, ctx) => {
+  const r = resolveTarget(t.server, f.t, 'pane', ctx, t.ui.geometry()) || {};
+  const fctx = { session: r.session, window: r.window, pane: r.pane };
+  const items = [];
+  for (let i = 0; i < a.length;) {
+    const name = argToString(a[i]);
+    if (name === '') { items.push({ separator: true }); i++; continue; }
+    const key = argToString(a[i + 1] ?? '');
+    const cmd = a[i + 2];
+    i += 3;
+    let label = t.expandPlain(name, fctx);
+    const disabled = label.startsWith('-');
+    if (disabled) label = label.slice(1);
+    items.push({ label, key, disabled, command: menuCommand(t, cmd, fctx) });
+  }
+  const selectable = items.filter((x) => !x.separator && !x.disabled);
+  if (!selectable.length) return;
+  const title = f.T != null ? t.expandPlain(f.T, fctx) : '';
+  let chosen;
+  if (t.ui.menu) {
+    chosen = await t.ui.menu({ title, items, start: f.C != null ? Number(f.C) : 0, x: f.x, y: f.y });
+  } else {
+    const v = await t.ui.pick({ title: title || 'menu', fuzzy: false, items: selectable.map((x) => ({ label: x.key ? `(${x.key}) ${x.label}` : x.label, value: items.indexOf(x) })) });
+    chosen = v == null ? null : items[v];
+  }
+  if (!chosen || chosen.disabled || chosen.separator || !chosen.command) return;
+  await t.runString(chosen.command, { ...ctx, ...fctx, fromKey: true });
+});
+
+def('display-popup', 'popup', 'BCEkNb:c:d:e:h:s:S:t:T:w:x:y:', async (t, f, a, ctx) => {
+  if (f.C) { t.ui.closePopup?.(); return; }
+  const r = resolveTarget(t.server, f.t, 'pane', ctx, t.ui.geometry()) || {};
+  const fctx = { session: r.session, window: r.window, pane: r.pane };
+  let cmd = a.length ? asCommandString(a) : '';
+  if (!cmd) cmd = t.getOption('default-command');
+  if (!cmd && f.d) cmd = t.expandPlain(f.d, fctx);
+  const geometry = { width: f.w, height: f.h, x: f.x, y: f.y, title: f.T != null ? t.expandPlain(f.T, fctx) : '', border: f.B ? 'none' : f.b };
+  if (cmd && looksLikeUrl(cmd)) {
+    if (!t.ui.popup) { t.ui.openTab?.(toUrl(cmd, t.getOption('@ctmux-search-url'))); return; }
+    t.ui.popup({ ...geometry, url: toUrl(cmd, t.getOption('@ctmux-search-url')) });
+    return;
+  }
+  if (!cmd) { t.ui.popup?.({ ...geometry, url: '' }); return; }
+  const res = await t.shell(t.expandPlain(cmd, fctx), { ...ctx, ...fctx });
+  if (!res) {
+    t.notice(`display-popup "${short(cmd)}": shell commands can't run in the browser (a URL opens in the popup)`, { source: ctx.source, line: ctx.line, level: 'info', key: 'popup:' + cmd });
+    if (!ctx.fromConfig) t.ui.message(`display-popup: can't run '${short(cmd)}' in the browser`);
+    return;
+  }
+  const out = res.out.replace(/\n$/, '');
+  if (out && !f.E) {
+    if (t.ui.popup) t.ui.popup({ ...geometry, text: out });
+    else t.ui.showList({ title: geometry.title || 'popup', lines: out.split('\n') });
+  }
+});
+
+// --------------------------------------------------------- synchronisation
+
+function channel(t, name) {
+  if (!t.waitChannels.has(name)) t.waitChannels.set(name, { waiters: [], woken: false, locked: false, lockers: [] });
+  return t.waitChannels.get(name);
+}
+
+def('wait-for', 'wait', 'LSU', async (t, f, a, ctx) => {
+  const name = argToString(a[0] ?? '');
+  if (!name) throw new Error('missing channel');
+  const ch = channel(t, name);
+  if (f.S) {
+    if (!ch.waiters.length) ch.woken = true;
+    ch.waiters.splice(0).forEach((w) => w());
+    return;
+  }
+  if (f.U) {
+    if (!ch.locked) throw new Error(`channel ${name} not locked`);
+    const next = ch.lockers.shift();
+    if (next) next(); else ch.locked = false;
+    return;
+  }
+  if (f.L) {
+    if (!ch.locked) { ch.locked = true; return; }
+    if (ctx.fromConfig) throw new Error(`channel ${name} is locked (not waiting while the config loads)`);
+    await new Promise((res) => ch.lockers.push(res));
+    return;
+  }
+  if (ch.woken) { ch.woken = false; return; }
+  if (ctx.fromConfig) {
+    t.notice(`wait-for ${name}: not waiting while the config loads`, { source: ctx.source, line: ctx.line, level: 'info' });
+    return;
+  }
+  await new Promise((res) => ch.waiters.push(res));
+});
+
+// ------------------------------------------------------------ capture etc.
+
+def('capture-pane', 'capturep', 'ab:CeE:JNpPqS:t:T', async (t, f, a, ctx) => {
+  const r = target(t, f.t, 'pane', ctx);
+  const p = t.server.panes[r.pane];
+  let text = '';
+  if (p.kind === 'web') {
+    const res = await t.ui.paneCommand?.(r.pane, { type: 'capture', all: f.S === '-' });
+    text = res?.text ?? [p.title, p.url].filter(Boolean).join('\n');
+  } else {
+    text = p.prefill || '';
+  }
+  if (f.J) text = text.replace(/\n(?=\S)/g, ' ');
+  let ls = text.split('\n');
+  const n = (v, def) => (v == null || v === '-' ? def : Number(v));
+  if (f.S != null || f.E != null) {
+    const start = n(f.S, 0), end = n(f.E, ls.length - 1);
+    ls = ls.slice(Math.max(0, start < 0 ? ls.length + start : start), (end < 0 ? ls.length + end : end) + 1);
+  }
+  text = ls.join('\n');
+  if (f.p) { t.output(ctx, ls, 'capture-pane'); return; }
+  pushBuffer(t, text, f.b);
+});
+
+function pushBuffer(t, data, name) {
+  if (name) {
+    const b = t.buffers.find((x) => x.name === name);
+    if (b) { b.data = data; b.time = Date.now(); return b; }
+  }
+  const b = { name: name || `buffer${String(t.buffers.length).padStart(4, '0')}`, data, time: Date.now() };
+  t.buffers.unshift(b);
+  const limit = Number(t.getOption('buffer-limit')) || 50;
+  if (t.buffers.length > limit) t.buffers.length = limit;
+  return b;
+}
+
+def('save-buffer', 'saveb', 'ab:', (t, f, a, ctx) => {
+  const b = f.b ? t.buffers.find((x) => x.name === f.b) : t.buffers[0];
+  if (!b) throw new Error('no buffers');
+  const path = argToString(a[0] ?? '-');
+  if (path === '-' && ctx.print) { b.data.split('\n').forEach((l) => ctx.print(l)); return; }
+  // No file system: the closest useful thing is the system clipboard.
+  t.ui.writeClipboard?.(b.data);
+  if (path !== '-') t.notice(`save-buffer ${path}: no file system in the browser; copied to the clipboard instead`, { level: 'info', key: 'save-buffer' });
+});
+
+def('load-buffer', 'loadb', 'b:t:w', async (t, f, a) => {
+  const path = argToString(a[0] ?? '-');
+  let data;
+  if (path === '-') data = (await t.ui.readClipboard?.()) ?? '';
+  else {
+    try { data = await t.loadFile(path); } catch (err) { throw new Error(`${path}: ${err.message || err}`); }
+  }
+  pushBuffer(t, String(data), f.b);
+  if (f.w) t.ui.writeClipboard?.(String(data));
+});
+
+def('pipe-pane', 'pipep', 'IOot:', (t, f, a, ctx) => {
+  if (a.length) t.notice('pipe-pane: panes have no output stream in the browser', { source: ctx.source, line: ctx.line, level: 'info', key: 'pipe-pane' });
+});
+
+// ------------------------------------------------------- clients / server
+
+def('list-clients', 'lsc', 'F:f:t:', (t, f, a, ctx) => {
+  const fmt = f.F || '#{client_name}: #{session_name} [#{client_width}x#{client_height} #{client_termname}] (utf8)';
+  t.output(ctx, [t.expandPlain(fmt)], 'list-clients');
+});
+
+def('attach-session', ['attach', 'a', 'at'], 'c:dEf:rt:x', (t, f, a, ctx) => {
+  if (!t.server.sessions.length) throw new Error('no sessions');
+  if (f.t) {
+    const r = target(t, f.t, 'session', ctx);
+    t.server.switchTo(r.session);
+    if (r.window) t.server.selectWindow(r.session, r.window);
+  }
+  t.ui.focusPane?.();
+});
+
+def('start-server', 'start', '', () => {});
+def('server-access', null, 'adlrw', (t, f, a, ctx) => { if (f.l) t.output(ctx, [], 'server-access'); });
+def('resize-window', 'resizew', 'aADLRt:Ux:y:', () => {}); // the window is the browser tab
+def('unlink-window', 'unlinkw', 'kt:', (t, f, a, ctx) => {
+  const r = target(t, f.t, 'window', ctx);
+  if (!f.k && r.session.windows.length <= 1 && t.server.sessions.length <= 1) throw new Error('window only linked to one session');
+  t.server.killWindow(r.session, r.window);
+  t.ui.serverEmpty?.();
+  t.ui.focusPane?.();
+});
+def('customize-mode', null, 'F:f:Nt:yZ', (t, f, a, ctx) => COMMANDS.get('show-options').run(t, {}, [], ctx));
+def('show-prompt-history', 'showphist', 'T:', (t, f, a, ctx) => t.output(ctx, t.ui.promptHistory?.() || [], 'prompt history'));
+def('clear-prompt-history', 'clearphist', 'T:', (t) => t.ui.clearPromptHistory?.());
 
 // ---------------------------------------------------- chrome-tmux specific
 
