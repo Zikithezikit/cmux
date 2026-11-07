@@ -22,11 +22,8 @@ CHROME_CONFIG ?= $(HOME)/.config/google-chrome
 # so fall back to --no-sandbox there. Set RUN_FLAGS= to override.
 USERNS_RESTRICTED := $(shell cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)
 RUN_FLAGS ?= $(if $(and $(filter 1,$(USERNS_RESTRICTED)),$(findstring ms-playwright,$(CHROMIUM))),--no-sandbox)
-ESLINT      := npx -y eslint@8.57.0 --no-eslintrc --env browser,es2022,node \
-               --parser-options=ecmaVersion:2022,sourceType:module --global chrome \
-               --rule 'no-unused-vars:[error,{args:none}]' --rule 'no-undef:error' --ext .js,.mjs
 
-.PHONY: help install test e2e lint check icons package screenshots run app info clean distclean
+.PHONY: help install build typecheck test e2e check icons package screenshots run app info clean distclean
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z0-9-]+:.*## / {printf "  \033[32mmake %-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -37,36 +34,40 @@ node_modules: package.json
 	PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install
 	@touch node_modules
 
-install: node_modules ## Install dev dependencies (playwright-core, no browser download)
+install: node_modules ## Install dev dependencies (TypeScript, playwright-core; no browser download)
 
-test: ## Run the unit tests (Node, no browser)
+build: node_modules ## Compile the TypeScript sources in place (src/**/*.ts -> .js)
+	npm run -s build
+
+typecheck: node_modules ## Type-check everything without emitting
+	npm run -s typecheck
+
+test: node_modules ## Build, then run the unit tests (Node, no browser)
 	npm test
 
 e2e: node_modules ## Drive the extension in Chromium (SCREENSHOTS=dir keeps screenshots)
 	CHROME_PATH="$(CHROMIUM)" npm run -s e2e
 
-lint: ## Check for undefined/unused identifiers with ESLint
-	$(ESLINT) src tests tools
+check: typecheck test e2e ## Type-check + unit tests + browser test
 
-check: lint test e2e ## Lint + unit tests + browser test
-
-icons: ## Regenerate icons/*.png
+icons: node_modules ## Regenerate icons/*.png
 	npm run -s icons
 
-package: ## Build dist/chrome-tmux-<version>.zip
+package: node_modules ## Build dist/chrome-tmux-<version>.zip
 	npm run -s package
 
 screenshots: node_modules ## Regenerate docs/screenshots/*.png for the README (loads real sites)
+	npm run -s build
 	CHROME_PATH="$(CHROMIUM)" node tools/screenshots.mjs
 
-run: ## Launch Chromium with the extension loaded and the workspace open (dev profile)
+run: build ## Launch Chromium with the extension loaded and the workspace open (dev profile)
 	@test -n "$(CHROMIUM)" || { echo "No Chromium found; set CHROMIUM=/path/to/chromium"; exit 1; }
 	@$(if $(RUN_FLAGS),echo "note: AppArmor blocks this Chromium's sandbox; running the dev profile with $(RUN_FLAGS)")
 	"$(CHROMIUM)" $(RUN_FLAGS) --user-data-dir="$(DEV_PROFILE)" \
 	  --disable-extensions-except="$(ROOT)" --load-extension="$(ROOT)" \
 	  "$(OPTIONS)" "$(WORKSPACE)"
 
-app: ## Open the workspace as a chromeless app window in your Chrome
+app: build ## Open the workspace as a chromeless app window in your Chrome
 	@test -n "$(CHROME)" || { echo "No Chrome found; set CHROME=/path/to/chrome"; exit 1; }
 	@profile=$$(node tools/chrome-profile.mjs $(EXT_ID) "$(CHROME_CONFIG)"); \
 	if [ -z "$$profile" ]; then \
@@ -81,7 +82,7 @@ app: ## Open the workspace as a chromeless app window in your Chrome
 	echo "opening the workspace in Chrome profile '$$profile'"; \
 	"$(CHROME)" --profile-directory="$$profile" --app="$(WORKSPACE)" >/dev/null 2>&1 &
 
-info: ## Print version, extension ID, URLs and browsers used
+info: build ## Print version, extension ID, URLs and browsers used
 	@echo "version    $(VERSION)"
 	@echo "id         $(EXT_ID)"
 	@echo "workspace  $(WORKSPACE)"

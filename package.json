@@ -5,12 +5,17 @@
   "description": "tmux for Chrome: panes, windows, sessions, status line and your ~/.tmux.conf (MV3 extension)",
   "type": "module",
   "scripts": {
-    "test": "node --test tests/*.test.js",
-    "icons": "node tools/make-icons.js",
-    "e2e": "node tests/e2e/smoke.mjs",
-    "package": "sh tools/package.sh"
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.node.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "test": "npm run -s build && node --test tests/*.test.js",
+    "icons": "npm run -s build && node tools/make-icons.js",
+    "e2e": "npm run -s build && node tests/e2e/smoke.mjs",
+    "package": "npm run -s build && sh tools/package.sh"
   },
   "devDependencies": {
-    "playwright-core": "1.55"
+    "@types/chrome": "^0.3.7",
+    "@types/node": "^22.20.5",
+    "playwright-core": "1.55",
+    "typescript": "^7.0.2"
   }
 }

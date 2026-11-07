@@ -1,3 +1,9 @@
 node_modules/
 dist/
 .dev-profile/
+# TypeScript output (compiled in place by `npm run build`)
+src/**/*.js
+tests/**/*.js
+tests/**/*.mjs
+tools/**/*.js
+tools/**/*.mjs

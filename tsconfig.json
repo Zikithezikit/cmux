@@ -1,0 +1,10 @@
+{
+  // The extension itself (runs in Chrome). Compiled in place: src/**/*.ts ->
+  // src/**/*.js next to it, so manifest.json and the HTML pages keep their paths
+  // and "Load unpacked" on the repo root keeps working (and keeps its ID).
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["chrome"]
+  },
+  "include": ["src/**/*.ts"]
+}

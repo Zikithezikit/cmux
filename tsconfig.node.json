@@ -1,0 +1,8 @@
+{
+  // Node-side code: unit tests, the browser smoke test and the tools/ scripts.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node", "chrome"]
+  },
+  "include": ["tests/**/*.ts", "tests/**/*.mts", "tools/**/*.ts", "tools/**/*.mts"]
+}
