@@ -146,12 +146,15 @@ export class Server extends EventTarget {
   }
 
   load(json: Partial<ServerState> | null | undefined): boolean {
-    if (!json || json.version !== 1 || !Array.isArray(json.sessions) || !json.sessions.length) return false;
+    if (json?.version !== 1 || !Array.isArray(json.sessions) || !json.sessions.length) return false;
     this.sessions = json.sessions;
     this.currentId = json.currentId ?? json.sessions[0].id;
     this.lastSessionId = json.lastSessionId ?? null;
     this.panes = {};
-    for (const [id, p] of Object.entries(json.panes || {})) this.panes[id as unknown as number] = { ...p, id: Number(id) };
+    for (const [key, p] of Object.entries(json.panes || {})) {
+      const id = Number(key);
+      this.panes[id] = { ...p, id };
+    }
     this.seq = json.seq || this.seq;
     this.created = json.created || Date.now();
     // Drop panes that are referenced nowhere / windows whose panes vanished.
@@ -252,7 +255,7 @@ export class Server extends EventTarget {
     return restored;
   }
 
-  changed(reason = 'change') {
+  changed(reason = 'change'): void {
     this.dispatchEvent(new CustomEvent('change', { detail: reason }));
   }
 
@@ -400,12 +403,13 @@ export class Server extends EventTarget {
     const loc = this.locate(paneId);
     if (!loc) return;
     const { session, window } = loc;
-    window.layout = L.removePane(window.layout, paneId)!;
+    const layout = L.removePane(window.layout, paneId);
     delete this.panes[paneId];
-    if (!window.layout) { this.killWindow(session, window); return; }
+    if (!layout) { this.killWindow(session, window); return; }
+    window.layout = layout;
     window.zoomed = false;
-    const ids = L.panesInOrder(window.layout);
-    if (window.last === paneId || !ids.includes(window.last as number)) window.last = null;
+    const ids = L.panesInOrder(layout);
+    if (window.last == null || window.last === paneId || !ids.includes(window.last)) window.last = null;
     if (window.active === paneId) window.active = window.last && ids.includes(window.last) ? window.last : ids[0];
   }
 
@@ -430,7 +434,7 @@ export class Server extends EventTarget {
     this.sessions = this.sessions.filter((s) => s !== session);
     if (this.currentId === session.id) {
       const last = this.sessionById(this.lastSessionId);
-      this.currentId = (last || this.sessions[0] || {} as Partial<Session>).id ?? null;
+      this.currentId = (last || this.sessions.at(0))?.id ?? null;
       this.lastSessionId = null;
     }
     if (this.lastSessionId === session.id) this.lastSessionId = null;
@@ -448,11 +452,13 @@ export class Server extends EventTarget {
     if (!loc) return null;
     const { session, window } = loc;
     if (L.panesInOrder(window.layout).length < 2) return window;
-    window.layout = L.removePane(window.layout, paneId)!;
+    const layout = L.removePane(window.layout, paneId);
+    if (!layout) return window; // unreachable: the window has at least two panes
+    window.layout = layout;
     window.zoomed = false;
     if (window.active === paneId) {
-      const ids = L.panesInOrder(window.layout);
-      window.active = ids.includes(window.last as number) ? window.last as number : ids[0];
+      const ids = L.panesInOrder(layout);
+      window.active = window.last != null && ids.includes(window.last) ? window.last : ids[0];
       window.last = null;
     }
     return this.newWindow(session, { pane: this.panes[paneId], name, select, index, after });
@@ -462,13 +468,15 @@ export class Server extends EventTarget {
     const loc = this.locate(paneId);
     if (!loc || loc.window === targetWindow) return;
     const { session, window } = loc;
-    window.layout = L.removePane(window.layout, paneId)!;
-    if (!window.layout) {
+    const layout = L.removePane(window.layout, paneId);
+    if (!layout) {
+      // The pane was the window's only one: the window goes away (the pane moves on).
       session.windows = session.windows.filter((w) => w !== window);
-      if (session.active === window.id) session.active = (session.windows[0] || {} as Partial<Window>).id!;
+      if (session.active === window.id) session.active = session.windows.at(0)?.id ?? null;
       if (!session.windows.length) this.killSession(session);
-    } else if (window.active === paneId) {
-      window.active = L.panesInOrder(window.layout)[0];
+    } else {
+      window.layout = layout;
+      if (window.active === paneId) window.active = L.panesInOrder(layout)[0];
     }
     targetWindow.layout = L.splitPane(targetWindow.layout, targetPaneId, paneId, dir, opts);
     targetWindow.zoomed = false;
@@ -482,7 +490,7 @@ export class Server extends EventTarget {
   moveWindow(session: Session, window: Window, index: number, targetSession: Session = session): void {
     if (targetSession !== session) {
       session.windows = session.windows.filter((w) => w !== window);
-      if (session.active === window.id) session.active = (session.windows[0] || {} as Partial<Window>).id!;
+      if (session.active === window.id) session.active = session.windows.at(0)?.id ?? null;
       if (!session.windows.length) this.killSession(session);
       targetSession.windows.push(window);
     }
