@@ -7,5 +7,5 @@ version=$(node -p "require('./manifest.json').version")
 out="dist/chrome-tmux-$version.zip"
 mkdir -p dist
 rm -f "$out"
-zip -qr "$out" manifest.json icons src -x '*.DS_Store'
+zip -qr "$out" manifest.json icons src -x '*.DS_Store' -x '*.ts'
 echo "$out"

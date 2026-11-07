@@ -12,7 +12,9 @@ panes. Window list on the left, the Dracula weather widget on the right.*
 
 ## Install
 
-1. `chrome://extensions` → enable **Developer mode** → **Load unpacked** → pick this folder.
+1. Build it once: `npm install && npm run build` (or `make build`). The sources are TypeScript and
+   compile in place to the `.js` files Chrome loads.
+   Then `chrome://extensions` → enable **Developer mode** → **Load unpacked** → pick this folder.
 2. The options page opens. Load your config, either by path (recommended) or by upload or paste.
    For the path option, enable **Allow access to file URLs** on the extension's details page
    and enter an absolute path such as `/home/you/.tmux.conf`. The file is then re-read on every
@@ -105,7 +107,7 @@ the built-in shell below, and `#()` in formats.
 
 There is no `/bin/sh` in a browser, but the shell snippets in real configs and plugins
 are a small, familiar set. `if-shell`, `run-shell` and `display-popup` run them with a
-built-in POSIX-shell subset (`src/core/shell.js`):
+built-in POSIX-shell subset (`src/core/shell.ts`):
 
 - `;`, `&&`, `||`, `|`, `!`, quoting, `$VAR`/`${VAR:-x}`, `$(…)` and backticks, `>/dev/null 2>&1`
 - `tmux …` runs the tmux command in this engine, and its output can be captured:
@@ -132,27 +134,28 @@ behaviour: the condition is false and the debug panel says why.
 
 ```
 manifest.json
-src/
-  background/service-worker.js   DNR session rule: strip X-Frame-Options + CSP on sub_frame
+tsconfig*.json                   TypeScript config (src: browser; tests + tools: Node)
+src/                             TypeScript, compiled in place to .js by `npm run build`
+  background/service-worker.ts   DNR session rule: strip X-Frame-Options + CSP on sub_frame
                                  responses, scoped (tabIds) to workspace tabs only
-  content/pane-agent.js          runs in pane iframes: key routing, URL/title reports,
+  content/pane-agent.ts          runs in pane iframes: key routing, URL/title reports,
                                  copy mode (Selection API), paste, link collection
-  shared/keys.js                 tmux key names + key-table router (shared by page and agent)
-  shared/config-source.js        tmux.conf from a file:// path or stored text
+  shared/keys.ts                 tmux key names + key-table router (shared by page and agent)
+  shared/config-source.ts        tmux.conf from a file:// path or stored text
   core/                          UI-independent engine (unit-tested in Node)
-    parser.js                    tmux config/command tokenizer, getopt
-    format.js                    #{formats}, #[styles], colours, strftime
-    layout.js                    split tree: geometry, navigation, resize, preset layouts
-    server.js                    sessions → windows → panes, snapshots
-    target.js                    -t target resolution (session:window.pane, %id, {last}, …)
-    commands.js                  91 tmux commands (+ aliases)
-    shell.js                     POSIX-shell subset for if-shell / run-shell / display-popup
-    defaults.js                  tmux 3.4 default options and key tables
-    tmux.js                      engine: options, key tables, sourcing, dispatch
-  tpm/tpm.js, tpm/plugins/*      TPM emulation layer + plugin emulators
+    parser.ts                    tmux config/command tokenizer, getopt
+    format.ts                    #{formats}, #[styles], colours, strftime
+    layout.ts                    split tree: geometry, navigation, resize, preset layouts
+    server.ts                    sessions → windows → panes, snapshots
+    target.ts                    -t target resolution (session:window.pane, %id, {last}, …)
+    commands.ts                  91 tmux commands (+ aliases)
+    shell.ts                     POSIX-shell subset for if-shell / run-shell / display-popup
+    defaults.ts                  tmux 3.4 default options and key tables
+    tmux.ts                      engine: options, key tables, sourcing, dispatch
+  tpm/tpm.ts, tpm/plugins/*      TPM emulation layer + plugin emulators
   workspace/                     the tmux "client" page: status line, panes, overlays
   options/                       config loader + parse report
-tests/                           unit tests (node --test, incl. a real-world tmux.conf) + e2e/smoke.mjs
+tests/                           unit tests (node --test, incl. a real-world tmux.conf) + e2e/smoke.mts
 tools/                           icon generator, packaging
 ```
 
@@ -180,8 +183,9 @@ windows or layouts doesn't reload pages.
 |---|---|
 | `make run` | Launches Chromium with the extension loaded (separate dev profile) and opens the options page and workspace |
 | `make app` | Opens the workspace as a chromeless `--app` window in your everyday Chrome (extension loaded there via *Load unpacked*) |
-| `make check` | Lint, unit tests and the browser test |
-| `make test` / `make e2e` / `make lint` | Each of those on its own |
+| `make build` | Compiles the TypeScript sources in place (`src/**/*.ts` → `.js`); `make run`, `app`, `test`, `e2e` and `package` build first |
+| `make check` | Type-check, unit tests and the browser test |
+| `make typecheck` / `make test` / `make e2e` | Each of those on its own |
 | `make package` | Builds `dist/chrome-tmux-<version>.zip` |
 | `make info` | Prints the extension ID, workspace URL and the browsers found |
 | `make screenshots` | Regenerates the README images in `docs/screenshots/` (needs network: it loads real sites) |
@@ -199,7 +203,9 @@ Use that profile only for development, not everyday browsing.
 The same tasks as npm scripts:
 
 ```sh
-npm install         # only needed for the browser test (playwright-core)
+npm install         # TypeScript, Chrome/Node types, playwright-core
+npm run build       # compile src/, tests/ and tools/ in place
+npm run typecheck   # tsc --noEmit over everything
 npm test            # unit tests: parser, formats, layouts, engine, TPM, resurrect
 npm run e2e         # loads the extension into Chromium and drives it with real keys
 npm run package     # dist/chrome-tmux-<version>.zip
