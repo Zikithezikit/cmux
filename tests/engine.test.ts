@@ -5,7 +5,8 @@ import { Tmux } from '../src/core/tmux.js';
 import { Tpm, memoryStorage, parsePluginSpec } from '../src/tpm/tpm.js';
 import { panesInOrder } from '../src/core/layout.js';
 import type { TpmFetch, TpmTimers } from '../src/tpm/tpm.js';
-import type { KeyValueStorage, SplitNode, Ui, Window as TmuxWindow } from '../src/core/types.js';
+import type { ServerState } from '../src/core/server.js';
+import type { KeyValueStorage, LayoutNode, SplitNode, Ui, Window as TmuxWindow } from '../src/core/types.js';
 
 /** A stub UI: records messages; any method it doesn't define is a no-op. */
 type StubUi = Ui & { messages: string[] };
@@ -17,13 +18,39 @@ type Engine = Tmux & { ui: StubUi };
 interface BootOptions {
   ui?: StubUi;
   storage?: KeyValueStorage;
-  fetchImpl?: (url: string) => Promise<unknown>;
+  fetchImpl?: StubFetch;
 }
 
-const fixture = readFileSync(new URL('./fixtures/user.tmux.conf', import.meta.url), 'utf8');
-const timers = { setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout } as unknown as TpmTimers;
+/** A fetch stub: resolves to a minimal Response-like object. */
+type StubFetch = (url: string) => Promise<unknown>;
 
-function stubUi(extra: StubOverrides = {}) {
+const fixture = readFileSync(new URL('./fixtures/user.tmux.conf', import.meta.url), 'utf8');
+
+/**
+ * TPM's timer and fetch dependencies, stubbed. The stubs don't match TpmTimers/TpmFetch
+ * exactly (a numeric interval handle, a Response-like object), so the casts live here
+ * and can be dropped in one place if those types are narrowed to what TPM uses.
+ */
+function tpmDeps(fetchImpl: StubFetch): { timers: TpmTimers; fetchImpl: TpmFetch } {
+  return {
+    timers: { setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout } as unknown as TpmTimers,
+    fetchImpl: fetchImpl as unknown as TpmFetch,
+  };
+}
+
+/** Assert that a value is present and return it (an assertion failure, not a TypeError). */
+function must<T>(value: T | null | undefined): T {
+  assert.ok(value != null, 'expected a value');
+  return value;
+}
+
+/** Narrow a layout node to a split (the assertions below read split fields). */
+function asSplit(node: LayoutNode): SplitNode {
+  assert.ok(node.type === 'split', 'expected a split node');
+  return node;
+}
+
+function stubUi(extra: StubOverrides = {}): StubUi {
   const messages: string[] = [];
   const ui = {
     messages,
@@ -36,9 +63,11 @@ function stubUi(extra: StubOverrides = {}) {
   return new Proxy(ui, { get: (o, p) => (p in o ? o[p as keyof typeof o] : () => {}) }) as unknown as StubUi;
 }
 
-async function boot(conf: string, { ui = stubUi(), storage = memoryStorage(), fetchImpl }: BootOptions = {}) {
+const weatherFetch: StubFetch = async () => ({ ok: true, text: async () => 'Sunny +21°C' });
+
+async function boot(conf: string, { ui = stubUi(), storage = memoryStorage(), fetchImpl = weatherFetch }: BootOptions = {}): Promise<{ t: Engine; tpm: Tpm; ui: StubUi }> {
   const t = new Tmux({ ui }) as Engine;
-  const tpm = new Tpm(t, { storage, timers, fetchImpl: (fetchImpl || (async () => ({ ok: true, text: async () => 'Sunny +21°C' }))) as unknown as TpmFetch });
+  const tpm = new Tpm(t, { storage, ...tpmDeps(fetchImpl) });
   await t.loadDefaults();
   if (conf) await t.runConfig(conf, { source: 'test.conf' });
   tpm.finish();
@@ -61,10 +90,10 @@ test("the user's real ~/.tmux.conf", async () => {
   assert.equal(t.getOption('mode-keys'), 'vi');
   assert.equal(t.getOption('base-index'), '1');
   assert.equal(t.getOption('status-position'), 'top');
-  assert.deepEqual(t.lookupKey('prefix', 'r')!.commands, [['source-file', '~/.tmux.conf']]);
-  assert.deepEqual(t.lookupKey('prefix', '"')!.commands, [['split-window', '-v', '-c', '#{pane_current_path}']]);
-  assert.deepEqual(t.lookupKey('prefix', 'H')!.commands, [['previous-window']]);
-  assert.deepEqual(t.lookupKey('root', 'C-l')!.commands, [['select-pane', '-R']]);
+  assert.deepEqual(must(t.lookupKey('prefix', 'r')).commands, [['source-file', '~/.tmux.conf']]);
+  assert.deepEqual(must(t.lookupKey('prefix', '"')).commands, [['split-window', '-v', '-c', '#{pane_current_path}']]);
+  assert.deepEqual(must(t.lookupKey('prefix', 'H')).commands, [['previous-window']]);
+  assert.deepEqual(must(t.lookupKey('root', 'C-l')).commands, [['select-pane', '-R']]);
   assert.ok(t.lookupKey('root', 'C-\\'), 'C-\\ binding survives the odd quoting');
   assert.ok(t.lookupKey('prefix', 'u'), 'fzf-url binding');
   assert.ok(t.lookupKey('prefix', 'I'), 'tpm install binding');
@@ -80,7 +109,7 @@ test("the user's real ~/.tmux.conf", async () => {
   const left = t.expand(t.getOption('status-left'));
   assert.match(left, /#\[bg=#50fa7b,fg=#282a36\] 0 /);
   assert.ok(t.getOption('status-right').includes('#{dracula_weather}'));
-  assert.equal(t.server.session!.windows[0].index, 1, 'base-index 1');
+  assert.equal(must(t.server.session).windows[0].index, 1, 'base-index 1');
 });
 
 test('keys drive splits, navigation, windows, zoom and kill', async () => {
@@ -88,9 +117,9 @@ test('keys drive splits, navigation, windows, zoom and kill', async () => {
   const srv = t.server;
   await t.handleKey({ table: 'prefix', key: '%' });
   await t.handleKey({ table: 'prefix', key: '"' });
-  let w = srv.window!;
+  let w = must(srv.window);
   assert.deepEqual(panesInOrder(w.layout).length, 3);
-  assert.equal((w.layout as SplitNode).dir, 'h');
+  assert.equal(asSplit(w.layout).dir, 'h');
   const third = w.active;
   await t.handleKey({ table: 'root', key: 'C-h' });
   assert.equal(w.active, panesInOrder(w.layout)[0]);
@@ -99,37 +128,37 @@ test('keys drive splits, navigation, windows, zoom and kill', async () => {
   await t.handleKey({ table: 'prefix', key: 'z' });
   assert.equal(w.zoomed, true);
   await t.handleKey({ table: 'prefix', key: 'c' });
-  assert.equal(srv.session!.windows.length, 2);
-  assert.equal(srv.window!.index, 2);
+  assert.equal(must(srv.session).windows.length, 2);
+  assert.equal(must(srv.window).index, 2);
   await t.handleKey({ table: 'prefix', key: 'H' });
-  assert.equal(srv.window!.index, 1);
+  assert.equal(must(srv.window).index, 1);
   await t.handleKey({ table: 'prefix', key: 'x' }); // confirm-before -> stub confirms
-  w = srv.window!;
+  w = must(srv.window);
   assert.equal(panesInOrder(w.layout).length, 2);
   await t.runString('kill-window -t :1');
-  assert.equal(srv.session!.windows.length, 1);
-  assert.equal(srv.session!.windows[0].index, 1, 'renumber-windows on');
+  assert.equal(must(srv.session).windows.length, 1);
+  assert.equal(must(srv.session).windows[0].index, 1, 'renumber-windows on');
 });
 
 test('command prompt templates and targets', async () => {
-  const answers = [['github.com']];
+  const answers: string[][] = [['github.com']];
   const ui = stubUi({ prompt: async () => answers.shift() });
   const { t } = await boot('', { ui });
   const srv = t.server;
   await t.handleKey({ table: 'prefix', key: 'g' });
-  assert.equal(srv.pane!.kind, 'web');
-  assert.equal(srv.pane!.url, 'https://github.com');
+  assert.equal(must(srv.pane).kind, 'web');
+  assert.equal(must(srv.pane).url, 'https://github.com');
   await t.runString('rename-window web ; new-window -n docs https://developer.chrome.com');
-  assert.equal(srv.window!.name, 'docs');
-  assert.equal(srv.pane!.url, 'https://developer.chrome.com');
+  assert.equal(must(srv.window).name, 'docs');
+  assert.equal(must(srv.pane).url, 'https://developer.chrome.com');
   await t.runString('select-window -t web');
-  assert.equal(srv.windowName(srv.window!), 'web');
+  assert.equal(srv.windowName(must(srv.window)), 'web');
   await t.runString('swap-window -s :0 -t :1');
-  assert.deepEqual(srv.sortedWindows(srv.session!).map((w: TmuxWindow) => w.name), ['docs', 'web']);
+  assert.deepEqual(srv.sortedWindows(must(srv.session)).map((w: TmuxWindow) => w.name), ['docs', 'web']);
   await t.runString('new-session -d -s work');
-  assert.equal(srv.session!.name, '0');
+  assert.equal(must(srv.session).name, '0');
   await t.runString('switch-client -n');
-  assert.equal(srv.session!.name, 'work');
+  assert.equal(must(srv.session).name, 'work');
   await t.runString('display-message "#S:#I"');
   assert.equal(ui.messages.at(-1), 'work:0');
 });
@@ -165,15 +194,15 @@ set -g @plugin 'someone/tmux-mystery'
 set -g @mystery-colour blue
 set -g not-a-real-option 1
 `);
-  assert.ok(t.notices.some((n) => /unknown option: not-a-real-option/.test(n.message)));
-  assert.ok(t.notices.some((n) => /unknown plugin someone\/tmux-mystery/.test(n.message) && /@mystery-colour/.test(n.message)));
+  assert.ok(t.notices.some((n) => n.message.includes('unknown option: not-a-real-option')));
+  assert.ok(t.notices.some((n) => n.message.includes('unknown plugin someone/tmux-mystery') && n.message.includes('@mystery-colour')));
   assert.equal(tpm.report()[0].status, 'unknown');
 });
 
 test('plugin spec parsing', () => {
-  assert.equal(parsePluginSpec('tmux-plugins/tmux-sensible')!.repo, 'tmux-plugins/tmux-sensible');
-  assert.equal(parsePluginSpec('https://github.com/dracula/tmux.git')!.repo, 'dracula/tmux');
-  assert.equal(parsePluginSpec('git@github.com:catppuccin/tmux.git#v2.1.0')!.branch, 'v2.1.0');
+  assert.equal(must(parsePluginSpec('tmux-plugins/tmux-sensible')).repo, 'tmux-plugins/tmux-sensible');
+  assert.equal(must(parsePluginSpec('https://github.com/dracula/tmux.git')).repo, 'dracula/tmux');
+  assert.equal(must(parsePluginSpec('git@github.com:catppuccin/tmux.git#v2.1.0')).branch, 'v2.1.0');
 });
 
 test('resurrect saves and restores layouts and URLs', async () => {
@@ -186,7 +215,7 @@ test('resurrect saves and restores layouts and URLs', async () => {
 
   const b = await boot(conf, { storage });
   await b.tpm.runStartup({ hadLiveState: false });
-  const s = b.t.server.session!;
+  const s = must(b.t.server.session);
   assert.equal(s.name, 'work');
   const urls = panesInOrder(s.windows[0].layout).map((id) => b.t.server.panes[id].url);
   assert.deepEqual(urls, ['https://example.com', 'https://example.org']);
@@ -204,15 +233,15 @@ test('GitHub metadata is fetched once and cached', async () => {
   await tpm.fetchMetadata();
   await tpm.fetchMetadata();
   assert.equal(calls, 1);
-  assert.equal(tpm.report()[0].meta!.fullName, 'dracula/tmux');
+  assert.equal(must(tpm.report()[0].meta).fullName, 'dracula/tmux');
 });
 
 test('server state round-trips through JSON', async () => {
   const { t } = await boot('');
   await t.runString('split-window -h ; new-window');
-  const json = JSON.parse(JSON.stringify(t.server.toJSON()));
+  const json = JSON.parse(JSON.stringify(t.server.toJSON())) as ServerState;
   const { t: t2 } = await boot('');
   assert.ok(t2.server.load(json));
-  assert.equal(t2.server.session!.windows.length, 2);
+  assert.equal(must(t2.server.session).windows.length, 2);
   assert.equal(Object.keys(t2.server.panes).length, 3);
 });

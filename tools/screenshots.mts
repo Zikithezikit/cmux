@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { Page } from 'playwright-core';
+import type { BrowserContext, Page } from 'playwright-core';
 
 /** The bits of the workspace's debug handle (`window.ctmux`) used below. */
 interface CtmuxDebug {
@@ -24,15 +24,32 @@ const OUT = path.join(ROOT, 'docs/screenshots');
 const CONF = fs.readFileSync(path.join(ROOT, 'tests/fixtures/user.tmux.conf'), 'utf8');
 const SIZE = { width: 1440, height: 820 };
 
-function findChromium() {
+function findChromium(): string {
   if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
   const root = process.env.PLAYWRIGHT_BROWSERS_PATH || path.join(os.homedir(), '.cache/ms-playwright');
-  const dirs = fs.existsSync(root) ? fs.readdirSync(root).filter((d) => /^chromium-\d+$/.test(d)).sort((a, b) => (b.split('-')[1] as unknown as number) - (a.split('-')[1] as unknown as number)) : [];
+  const dirs = fs.existsSync(root) ? fs.readdirSync(root).filter((d) => /^chromium-\d+$/.test(d)).sort((a, b) => Number(b.split('-')[1]) - Number(a.split('-')[1])) : [];
   for (const d of dirs) {
     const p = path.join(root, d, 'chrome-linux64/chrome');
     if (fs.existsSync(p)) return p;
   }
   throw new Error('Chromium not found; set CHROME_PATH');
+}
+
+/**
+ * On install the service worker calls chrome.runtime.openOptionsPage(), which
+ * reuses a blank tab; wait for it so it can't interrupt our first navigation
+ * (same as tests/e2e/smoke.mts).
+ */
+async function waitForInstallOptionsPage(context: BrowserContext, optionsUrl: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const opened = context.pages().find((p) => p.url().startsWith(optionsUrl));
+    if (opened) {
+      await opened.waitForLoadState('load');
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
 }
 
 fs.mkdirSync(OUT, { recursive: true });
@@ -43,8 +60,8 @@ const ctx = await chromium.launchPersistentContext(tmp, {
   args: ['--headless=new', `--disable-extensions-except=${ROOT}`, `--load-extension=${ROOT}`],
   viewport: SIZE,
 });
-const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const shot = async (page: Page, name: string) => {
+const pause = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+const shot = async (page: Page, name: string): Promise<void> => {
   await page.screenshot({ path: path.join(OUT, `${name}.png`) });
   console.log(`docs/screenshots/${name}.png`);
 };
@@ -53,6 +70,7 @@ try {
   let [sw] = ctx.serviceWorkers();
   if (!sw) sw = await ctx.waitForEvent('serviceworker');
   const id = new URL(sw.url()).host;
+  await waitForInstallOptionsPage(ctx, `chrome-extension://${id}/src/options/options.html`);
 
   // Options page with the config loaded.
   const opts = await ctx.newPage();
@@ -61,7 +79,14 @@ try {
   await opts.fill('#text', CONF);
   await opts.click('#save-text');
   await pause(600);
-  await opts.evaluate(() => { document.getElementById('status')!.textContent = ''; document.getElementById('text')!.scrollTop = 0; window.scrollTo(0, 0); });
+  await opts.evaluate(() => {
+    const status = document.getElementById('status');
+    const text = document.getElementById('text');
+    if (!status || !text) throw new Error('options page is missing #status or #text');
+    status.textContent = '';
+    text.scrollTop = 0;
+    window.scrollTo(0, 0);
+  });
   await shot(opts, 'options');
   await opts.close();
 
@@ -69,7 +94,7 @@ try {
   await ws.goto(`chrome-extension://${id}/src/workspace/workspace.html`);
   await ws.waitForSelector('#boot.done', { state: 'attached' });
   const run = (cmd: string) => ws.evaluate((c) => window.ctmux.t.runString(c), cmd);
-  const key = async (...keys: string[]) => { for (const k of keys) { await ws.keyboard.press(k); await pause(120); } };
+  const key = async (...keys: string[]): Promise<void> => { for (const k of keys) { await ws.keyboard.press(k); await pause(120); } };
 
   // Sessions: "dev" (shown) plus two others for the session manager.
   await run('rename-session dev');

@@ -13,9 +13,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { AddressInfo } from 'node:net';
-import type { Page } from 'playwright-core';
-import type { LayoutNode, Notice, Rect, SplitNode } from '../../src/core/types.js';
+import type { BrowserContext, Page } from 'playwright-core';
+import type { LayoutNode, Notice, Rect } from '../../src/core/types.js';
 
 /** The bits of the workspace's debug handle (`window.ctmux`) the test reads. */
 interface CtmuxDebug {
@@ -43,9 +42,9 @@ const EXT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const SHOTS = process.env.SCREENSHOTS || null;
 const fixture = fs.readFileSync(path.join(EXT, 'tests/fixtures/user.tmux.conf'), 'utf8');
 
-function findChromium() {
+function findChromium(): string {
   if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
-  const roots = [process.env.PLAYWRIGHT_BROWSERS_PATH, path.join(os.homedir(), '.cache/ms-playwright')].filter(Boolean) as string[];
+  const roots = [process.env.PLAYWRIGHT_BROWSERS_PATH, path.join(os.homedir(), '.cache/ms-playwright')].filter((r): r is string => Boolean(r));
   for (const root of roots) {
     if (!fs.existsSync(root)) continue;
     const dirs = fs.readdirSync(root).filter((d) => /^chromium-\d+$/.test(d)).sort((a, b) => Number(b.split('-')[1]) - Number(a.split('-')[1]));
@@ -59,9 +58,35 @@ function findChromium() {
   throw new Error('Chromium not found; set CHROME_PATH');
 }
 
+/**
+ * On install the service worker calls chrome.runtime.openOptionsPage(), which
+ * reuses a blank tab. If the test opens its first page before that happens, the
+ * options page takes over the tab and interrupts the test's navigation. Wait
+ * until the options page is up (it stays open, as before) before going on.
+ */
+async function waitForInstallOptionsPage(context: BrowserContext, optionsUrl: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const opened = context.pages().find((p) => p.url().startsWith(optionsUrl));
+    if (opened) {
+      await opened.waitForLoadState('load');
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  console.log(`# the options page did not open on install within ${timeoutMs} ms; continuing`);
+}
+
+/** The text of the first element matching `selector`, which must have some. */
+async function textOf(p: Page, selector: string): Promise<string> {
+  const text = await p.textContent(selector);
+  assert.ok(text != null, `no text content for ${selector}`);
+  return text;
+}
+
 const page = (title: string, body: string) => `<!doctype html><title>${title}</title><body style="font:16px sans-serif;margin:20px"><h1>${title}</h1>${body}</body>`;
 const server = http.createServer((req, res) => {
-  if (req.url!.startsWith('/deny')) {
+  if (req.url?.startsWith('/deny')) {
     res.writeHead(200, { 'content-type': 'text/html', 'x-frame-options': 'DENY', 'content-security-policy': "frame-ancestors 'none'" });
     res.end(page('Denied page', '<p id=t>This page forbids framing.</p><p>Second line of text.</p><a href="https://example.com/a">Example A</a><p>See https://github.com/tmux/tmux too</p>'));
   } else {
@@ -70,7 +95,9 @@ const server = http.createServer((req, res) => {
   }
 });
 await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
-const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+const address = server.address();
+if (address == null || typeof address === 'string') throw new Error('test server has no TCP address');
+const base = `http://127.0.0.1:${address.port}`;
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ctmux-e2e-'));
 const ctx = await chromium.launchPersistentContext(path.join(tmp, 'profile'), {
@@ -82,13 +109,14 @@ const ctx = await chromium.launchPersistentContext(path.join(tmp, 'profile'), {
 
 let failures = 0;
 const errors: string[] = [];
-async function step(name: string, fn: () => Promise<void>) {
+async function step(name: string, fn: () => Promise<void>): Promise<void> {
   try {
     await fn();
     console.log(`ok - ${name}`);
   } catch (err) {
     failures++;
-    console.log(`not ok - ${name}\n  ${String((err as Error).message).split('\n').join('\n  ')}`);
+    const message = err instanceof Error ? err.message : String(err);
+    console.log(`not ok - ${name}\n  ${message.split('\n').join('\n  ')}`);
   }
 }
 const shot = async (p: Page, name: string) => { if (SHOTS) { fs.mkdirSync(SHOTS, { recursive: true }); await p.screenshot({ path: path.join(SHOTS, `${name}.png`) }); } };
@@ -97,7 +125,8 @@ try {
   let [sw] = ctx.serviceWorkers();
   if (!sw) sw = await ctx.waitForEvent('serviceworker');
   const id = new URL(sw.url()).host;
-  const url = (p: string) => `chrome-extension://${id}/src/${p}`;
+  const url = (p: string): string => `chrome-extension://${id}/src/${p}`;
+  await waitForInstallOptionsPage(ctx, url('options/options.html'));
 
   const open = async () => {
     const ws = await ctx.newPage();
@@ -130,7 +159,7 @@ try {
     assert.equal(s.session, '0');
     assert.deepEqual(s.windows, [0]);
     assert.equal(s.panes[0].kind, 'launcher');
-    assert.match(await ws0.textContent('#status') as string, /\[0\] 0:new\*/);
+    assert.match(await textOf(ws0, '#status'), /\[0\] 0:new\*/);
   });
   await shot(ws0, 'defaults');
   await ws0.focus('.launcher input');
@@ -155,12 +184,15 @@ try {
     await ws0.keyboard.press('Alt+ArrowRight'); // repeat without prefix
     await ws0.waitForTimeout(100);
     assert.ok((await state(ws0)).width1 > w + 40, 'M-Right grows the pane (repeatable)');
-    const div = await (await ws0.$('.divider.h'))!.boundingBox();
-    await ws0.mouse.move(div!.x + 0.5, div!.y + 50);
+    const divider = await ws0.$('.divider.h');
+    assert.ok(divider, 'horizontal divider exists');
+    const div = await divider.boundingBox();
+    assert.ok(div, 'divider is visible');
+    await ws0.mouse.move(div.x + 0.5, div.y + 50);
     await ws0.mouse.down();
-    await ws0.mouse.move(div!.x - 150, div!.y + 50, { steps: 4 });
+    await ws0.mouse.move(div.x - 150, div.y + 50, { steps: 4 });
     await ws0.mouse.up();
-    assert.ok(Math.abs((await state(ws0)).width1 - (div!.x - 150)) < 4, 'border drag');
+    assert.ok(Math.abs((await state(ws0)).width1 - (div.x - 150)) < 4, 'border drag');
     await prefix(ws0, 'x');
     await ws0.keyboard.press('y');
     await ws0.waitForTimeout(100);
@@ -198,7 +230,7 @@ try {
   await opts.click('#save-text');
   await opts.waitForTimeout(400);
   await step('options page understands the config', async () => {
-    assert.match(await opts.textContent('#report') as string, /Everything in the file was understood/);
+    assert.match(await textOf(opts, '#report'), /Everything in the file was understood/);
     assert.equal((await opts.$$('#report td.ok')).length, 4, 'four emulated plugins');
   });
   await shot(opts, 'options');
@@ -221,14 +253,16 @@ try {
   });
   await step('prefix keys work from inside a page', async () => {
     const frame = ws.frames().find((f) => f.url().includes('/deny'));
-    await frame!.click('h1');
+    assert.ok(frame, 'frame exists');
+    await frame.click('h1');
     await ws.keyboard.press('Control+s');
     await ws.waitForTimeout(100);
     assert.equal((await state(ws)).prefix, true, 'prefix indicator');
     await ws.keyboard.press('Shift+Digit5');
     await ws.waitForTimeout(300);
     const s = await state(ws);
-    assert.equal((s.layout as SplitNode).dir, 'h');
+    assert.ok(s.layout.type === 'split', 'layout is split');
+    assert.equal(s.layout.dir, 'h');
     assert.equal(s.active, 2);
   });
   await step('root bindings (vim-tmux-navigator C-h) from a page', async () => {
@@ -236,7 +270,8 @@ try {
     await ws.press('.pane[data-pane="2"] .launcher input', 'Enter');
     await ws.waitForTimeout(1000);
     const plain = ws.frames().find((f) => f.url().includes('/plain'));
-    await plain!.click('h1');
+    assert.ok(plain, 'frame exists');
+    await plain.click('h1');
     await ws.keyboard.press('Control+h');
     await ws.waitForTimeout(300);
     assert.equal((await state(ws)).active, 1);
@@ -289,7 +324,7 @@ try {
     await ws.keyboard.press('Control+s');
     await ws.keyboard.press('Shift+H');
     await ws.waitForTimeout(200);
-    assert.match(await ws.textContent('#status') as string, / 1 127\.0\.0\.1\* +2 new-/);
+    assert.match(await textOf(ws, '#status'), / 1 127\.0\.0\.1\* +2 new-/);
     await shot(ws, 'workspace');
     await ws.keyboard.press('Control+s');
     await ws.keyboard.press('w');
@@ -306,7 +341,7 @@ try {
     await ws.waitForTimeout(200);
     await ws.keyboard.press('Tab');
     await ws.waitForTimeout(100);
-    assert.match(await ws.textContent('.debug') as string, /dracula\/tmux.*?emulated/);
+    assert.match(await textOf(ws, '.debug'), /dracula\/tmux.*?emulated/);
     await shot(ws, 'debug');
     await ws.keyboard.press('q');
   });
@@ -328,7 +363,7 @@ try {
     await ws.keyboard.press('s');
     await ws.waitForTimeout(200);
     assert.equal((await state(ws)).overlay, 'list');
-    assert.match(await ws.textContent('.ov-body') as string, /\(0\)\s+\+ 0: 2 windows \(attached\)\s+1:127\.0\.0\.1\*? 2:new\*?/);
+    assert.match(await textOf(ws, '.ov-body'), /\(0\)\s+\+ 0: 2 windows \(attached\)\s+1:127\.0\.0\.1\*? 2:new\*?/);
     await ws.keyboard.press('n');
     await ws.waitForTimeout(100);
     await ws.keyboard.type('work');
@@ -347,7 +382,7 @@ try {
     await ws.keyboard.press('Enter');
     await ws.waitForTimeout(200);
     assert.deepEqual((await sessions()).names, ['0', 'mail']);
-    assert.match(await ws.textContent('.ov-body') as string, /\(1\)\s+\+ mail: 1 window \(attached\)/, 'chooser stays open and updates');
+    assert.match(await textOf(ws, '.ov-body'), /\(1\)\s+\+ mail: 1 window \(attached\)/, 'chooser stays open and updates');
     await ws.keyboard.press('j'); // focus must be back on the list, not the filter
     await ws.keyboard.press('0'); // shortcut picks row (0)
     await ws.waitForTimeout(200);
@@ -372,7 +407,7 @@ try {
     await opts.fill('#path', file);
     await opts.click('#path-form button');
     await opts.waitForTimeout(400);
-    assert.match(await opts.textContent('#status') as string, /Loaded/);
+    assert.match(await textOf(opts, '#status'), /Loaded/);
     const w2 = await open();
     fs.appendFileSync(file, '\nset -g @e2e reloaded\n');
     await w2.keyboard.press('Control+s');
@@ -391,7 +426,7 @@ try {
     assert.equal(await w.locator('.pane.marked').count(), 1, 'prefix m marks the pane');
     await prefix(w, '>', 'Control+s'); // pane menu
     assert.equal((await state(w)).overlay, 'menu');
-    const text = await w.textContent('.ov-menu') as string;
+    const text = await textOf(w, '.ov-menu');
     assert.match(text, /Horizontal Split/);
     assert.match(text, /Unmark/, 'menu items are formats: the pane is marked');
     await shot(w, 'menu');

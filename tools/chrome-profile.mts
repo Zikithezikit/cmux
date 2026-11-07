@@ -11,24 +11,32 @@ const [id, configArg] = process.argv.slice(2);
 const configDir = configArg || join(homedir(), '.config/google-chrome');
 if (!id || !existsSync(configDir)) process.exit(0);
 
-let lastUsed = null;
+/** `value[key]` when `value` is a non-null object (parsed JSON), otherwise undefined. */
+function prop(value: unknown, key: string): unknown {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>)[key] : undefined;
+}
+
+const readJson = (file: string): unknown => JSON.parse(readFileSync(file, 'utf8'));
+
+let lastUsed: string | null = null;
 try {
-  lastUsed = JSON.parse(readFileSync(join(configDir, 'Local State'), 'utf8')).profile?.last_used ?? null;
+  const last = prop(prop(readJson(join(configDir, 'Local State')), 'profile'), 'last_used');
+  lastUsed = typeof last === 'string' ? last : null;
 } catch { /* no Local State */ }
 
-const hits = [];
+const hits: string[] = [];
 for (const dir of readdirSync(configDir)) {
   for (const file of ['Secure Preferences', 'Preferences']) {
     const p = join(configDir, dir, file);
     if (!existsSync(p)) continue;
     try {
-      const ext = JSON.parse(readFileSync(p, 'utf8')).extensions?.settings?.[id];
+      const ext = prop(prop(prop(readJson(p), 'extensions'), 'settings'), id);
       // state 0 = disabled; anything else (or missing) counts as installed.
-      if (ext && ext.state !== 0) { hits.push(dir); break; }
+      if (ext && prop(ext, 'state') !== 0) { hits.push(dir); break; }
     } catch { /* unreadable or mid-write */ }
   }
 }
 
 // Prefer the profile Chrome would open anyway.
-const pick = hits.includes(lastUsed) ? lastUsed : hits[0];
+const pick = lastUsed !== null && hits.includes(lastUsed) ? lastUsed : hits[0];
 if (pick) process.stdout.write(pick);
