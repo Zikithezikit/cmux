@@ -11,8 +11,8 @@ import { PaneView, GAP } from './panes.js';
 import { Overlays } from './overlays.js';
 import type { HistoryEntry } from './panes.js';
 import type { ServerState } from '../core/server.js';
-import type { ConfigInfo, PromptOptions } from './overlays.js';
-import type { Geometry, KeyValueStorage, Ui, UiOptions } from '../core/types.js';
+import type { ConfigInfo } from './overlays.js';
+import type { CopyModeOptions, Geometry, KeyValueStorage, PaneCommandMessage, Ui } from '../core/types.js';
 
 /** A key the router (src/shared/keys.ts) says the workspace should execute. */
 type KeyRoute = CtmuxRoute;
@@ -35,7 +35,7 @@ const RUNTIME_KEY = 'ctmux:runtime';
 const HISTORY_KEY = 'ctmux:history';
 
 const chromeStorage: KeyValueStorage = {
-  async get(k: string) { return (await chrome.storage.local.get(k))[k]; },
+  async get<T>(k: string) { return (await chrome.storage.local.get(k))[k] as T | undefined; },
   async set(k: string, v: unknown) { await chrome.storage.local.set({ [k]: v }); },
   async remove(k: string) { await chrome.storage.local.remove(k); },
 };
@@ -94,7 +94,7 @@ class Workspace {
       history: () => this.history,
     });
 
-    this.history = ((await chromeStorage.get(HISTORY_KEY)) as HistoryEntry[] | undefined) || [];
+    this.history = (await chromeStorage.get<HistoryEntry[]>(HISTORY_KEY)) || [];
     this.renderHistoryList();
     await t.loadDefaults();
     await this.loadConfig();
@@ -160,13 +160,13 @@ class Workspace {
     return {
       geometry: () => ({ rect: self.view?.areaRect?.w ? self.view.areaRect : self.view?.area() || { x: 0, y: 0, w: 1200, h: 800 }, gap: GAP, cell: self.cell }),
       message: (text, opts) => self.overlays?.message(text, opts),
-      prompt: (opts) => self.overlays.prompt(opts as PromptOptions),
-      confirm: (text, opts) => self.overlays.confirm(text, opts) as Promise<boolean>,
-      showList: (opts) => self.overlays.showList(opts as Parameters<Overlays['showList']>[0]),
+      prompt: (opts) => self.overlays.prompt(opts),
+      confirm: (text, opts) => self.overlays.confirm(text, opts),
+      showList: (opts) => self.overlays.showList(opts),
       showMessages: (tab) => self.overlays.debugPanel(tab || 'config'),
       chooseTree: (opts) => self.overlays.chooseTree(opts),
-      pick: (opts) => self.overlays.pick(opts as Parameters<Overlays['pick']>[0]),
-      displayPanes: (opts) => { self.render(); return self.overlays.displayPanes(opts as Parameters<Overlays['displayPanes']>[0]); },
+      pick: (opts) => self.overlays.pick(opts),
+      displayPanes: (opts) => { self.render(); return self.overlays.displayPanes(opts); },
       clock: (paneId) => { self.render(); self.overlays.clock(paneId); },
       copyMode: (paneId, opts) => self.enterCopyMode(paneId, opts),
       paneCommand: (paneId, msg) => self.paneCommand(paneId, msg),
@@ -176,7 +176,7 @@ class Workspace {
       refresh: () => { self.applyTheme(); self.render(); },
       writeClipboard: (text) => self.writeClipboard(text),
       readClipboard: async () => { try { return await navigator.clipboard.readText(); } catch { return ''; } },
-      menu: (opts) => self.overlays.menu(opts as Parameters<Overlays['menu']>[0]),
+      menu: (opts) => self.overlays.menu(opts),
       popup: (opts) => self.overlays.popup(opts),
       closePopup: () => self.overlays.closePopup(),
       promptHistory: () => self.overlays.promptHistory.slice(),
@@ -459,12 +459,12 @@ class Workspace {
 
   // ---------------------------------------------------------- pane agents
 
-  async paneCommand(paneId: number, msg: UiOptions) {
+  async paneCommand(paneId: number, msg: PaneCommandMessage) {
     const p = this.t.server.panes[paneId];
     if (!p || p.kind !== 'web') {
       if (msg.type === 'paste' && p) {
         const v = this.view.els.get(paneId);
-        if (v?.input) { v.input.setRangeText(msg.text, v.input.selectionStart!, v.input.selectionEnd!, 'end'); v.input.focus(); }
+        if (v?.input) { v.input.setRangeText(msg.text as string, v.input.selectionStart!, v.input.selectionEnd!, 'end'); v.input.focus(); }
       }
       return null;
     }
@@ -476,7 +476,7 @@ class Workspace {
     }
   }
 
-  async enterCopyMode(paneId: number, opts: UiOptions = {}) {
+  async enterCopyMode(paneId: number, opts: CopyModeOptions = {}) {
     const p = this.t.server.panes[paneId];
     if (!p || p.kind !== 'web') { this.overlays.message('copy-mode: pane has no page'); return; }
     const table = this.t.getOption('mode-keys') === 'vi' ? 'copy-mode-vi' : 'copy-mode';

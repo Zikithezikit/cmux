@@ -184,8 +184,8 @@ windows or layouts doesn't reload pages.
 | `make run` | Launches Chromium with the extension loaded (separate dev profile) and opens the options page and workspace |
 | `make app` | Opens the workspace as a chromeless `--app` window in your everyday Chrome (extension loaded there via *Load unpacked*) |
 | `make build` | Compiles the TypeScript sources in place (`src/**/*.ts` → `.js`); `make run`, `app`, `test`, `e2e` and `package` build first |
-| `make check` | Type-check, unit tests and the browser test |
-| `make typecheck` / `make test` / `make e2e` | Each of those on its own |
+| `make check` | Type-check, lint, unit tests and the browser test |
+| `make typecheck` / `make lint` / `make test` / `make e2e` | Each of those on its own |
 | `make package` | Builds `dist/chrome-tmux-<version>.zip` |
 | `make info` | Prints the extension ID, workspace URL and the browsers found |
 | `make screenshots` | Regenerates the README images in `docs/screenshots/` (needs network: it loads real sites) |
@@ -206,6 +206,7 @@ The same tasks as npm scripts:
 npm install         # TypeScript, Chrome/Node types, playwright-core
 npm run build       # compile src/, tests/ and tools/ in place
 npm run typecheck   # tsc --noEmit over everything
+npm run lint        # ESLint with type-aware typescript-eslint rules
 npm test            # unit tests: parser, formats, layouts, engine, TPM, resurrect
 npm run e2e         # loads the extension into Chromium and drives it with real keys
 npm run package     # dist/chrome-tmux-<version>.zip

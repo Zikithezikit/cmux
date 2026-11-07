@@ -20,7 +20,7 @@ interface HistoryEntry {
 export async function saveSnapshot(t: TpmHost, storage: KeyValueStorage, { quiet = false }: SnapshotOptions = {}) {
   const snap = t.server.snapshot();
   await storage.set(LAST_KEY, snap);
-  const history: HistoryEntry[] = (await storage.get(HISTORY_KEY)) || [];
+  const history = (await storage.get<HistoryEntry[]>(HISTORY_KEY)) || [];
   history.unshift({ savedAt: snap.savedAt, sessions: snap.sessions.length });
   await storage.set(HISTORY_KEY, history.slice(0, HISTORY_MAX));
   if (!quiet) t.ui.message('Tmux environment saved!');
@@ -28,7 +28,7 @@ export async function saveSnapshot(t: TpmHost, storage: KeyValueStorage, { quiet
 }
 
 export async function restoreSnapshot(t: TpmHost, storage: KeyValueStorage, { quiet = false }: SnapshotOptions = {}) {
-  const snap: ResurrectSnapshot | undefined = await storage.get(LAST_KEY);
+  const snap = await storage.get<ResurrectSnapshot>(LAST_KEY);
   if (!snap) { if (!quiet) t.ui.message('Tmux resurrect file not found!'); return 0; }
   const n = t.server.restore(snap);
   t.server.changed('restore');
