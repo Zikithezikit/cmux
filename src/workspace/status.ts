@@ -5,12 +5,6 @@ import { toRuns, truncateRuns, parseStyle, applyStyle, styleToCss } from '../cor
 import type { Run, Style } from '../core/format.js';
 import type { Tmux } from '../core/tmux.js';
 
-/** A resolved style (format.ts parseStyle/applyStyle). */
-export type RunStyle = Style;
-
-/** A run of text in one style (format.ts toRuns). */
-export type StyledRun = Run;
-
 /** What temporarily takes over the status line: a message or a prompt. */
 export interface StatusOverlay {
   message?: string;
@@ -19,15 +13,15 @@ export interface StatusOverlay {
 }
 
 // Powerline private-use glyphs → CSS shapes (no patched font needed).
-const PL: Record<string, string> = { '': 'r', '': 'l', '': 'rr', '': 'lr', '': 'rt', '': 'lt', '': 'rt', '': 'lt' };
+const PL: Readonly<Record<string, string>> = { '': 'r', '': 'l', '': 'rr', '': 'lr', '': 'rt', '': 'lt', '': 'rt', '': 'lt' };
 const PL_RE = /[-]/;
 
-export function baseStyle(t: Tmux) {
+export function baseStyle(t: Tmux): Style {
   return parseStyle(t.getOption('status-style'));
 }
 
 /** Append runs to `el` as styled spans. */
-export function renderRuns(el: HTMLElement, runs: StyledRun[]): void {
+export function renderRuns(el: HTMLElement, runs: readonly Run[]): void {
   for (const r of runs) {
     const css = styleToCss(r.style);
     const parts = PL_RE.test(r.text) ? r.text.split(/([-])/) : [r.text];
@@ -51,7 +45,7 @@ export function renderRuns(el: HTMLElement, runs: StyledRun[]): void {
   }
 }
 
-function segment(cls: string, runs: StyledRun[]): HTMLElement {
+function segment(cls: string, runs: readonly Run[]): HTMLElement {
   const el = document.createElement('div');
   el.className = `seg ${cls}`;
   renderRuns(el, runs);
@@ -60,7 +54,7 @@ function segment(cls: string, runs: StyledRun[]): HTMLElement {
 
 /**
  * Render the status line into `el`.
- * `overlay` is null, { message, style } or { prompt: HTMLElement }.
+ * `overlay` is null, a message, or a prompt element that takes over the line.
  */
 export function renderStatus(t: Tmux, el: HTMLElement, overlay: StatusOverlay | null): void {
   const app = document.getElementById('app')!;
@@ -115,7 +109,7 @@ export function renderStatus(t: Tmux, el: HTMLElement, overlay: StatusOverlay | 
     const runs = toRuns(t.expand(fmt, { session, window: w }, { time: true }), st);
     const span = document.createElement('div');
     span.className = 'win';
-    span.dataset.window = w.id as unknown as string;
+    span.dataset.window = String(w.id);
     renderRuns(span, runs);
     winEl.appendChild(span);
     if (sep && i < windows.length - 1) renderRuns(winEl, toRuns(sep, base));
