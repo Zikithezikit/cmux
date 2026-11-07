@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Registry of built-in JS emulators for TPM plugins.
 
 import tpmSelf from './tpm-self.js';
@@ -11,8 +10,9 @@ import vimTmuxNavigator from './vim-tmux-navigator.js';
 import dracula from './dracula.js';
 import fzfUrl from './fzf-url.js';
 import { prefixHighlight, tmuxBattery, onlineStatus } from './status-extras.js';
+import type { PluginEmulator } from '../tpm.js';
 
-export const EMULATORS = [
+export const EMULATORS: PluginEmulator[] = [
   tpmSelf, sensible, resurrect, continuum, yank, painControl,
   vimTmuxNavigator, dracula, fzfUrl, prefixHighlight, tmuxBattery, onlineStatus,
 ];

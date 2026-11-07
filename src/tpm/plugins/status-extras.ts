@@ -1,5 +1,17 @@
-// @ts-nocheck
 // Small status-line plugins that only provide #{format} variables.
+
+import type { PluginEmulator } from '../tpm.js';
+
+/** Battery Status API (not in lib.dom). */
+interface BatteryManager extends EventTarget {
+  level: number;
+  charging: boolean;
+  dischargingTime: number;
+}
+
+type BrowserNavigator = Navigator & {
+  getBattery?(): Promise<BatteryManager>;
+};
 
 export const prefixHighlight = {
   repo: 'tmux-plugins/tmux-prefix-highlight',
@@ -21,13 +33,13 @@ export const prefixHighlight = {
       return api.option('@prefix_highlight_empty_prompt', '');
     });
   },
-};
+} satisfies PluginEmulator;
 
-let battery = null;
-async function watchBattery(refresh) {
-  if (battery || typeof navigator === 'undefined' || !navigator.getBattery) return;
+let battery: BatteryManager | null = null;
+async function watchBattery(refresh: () => void) {
+  if (battery || typeof navigator === 'undefined' || !(navigator as BrowserNavigator).getBattery) return;
   try {
-    battery = await navigator.getBattery();
+    battery = await (navigator as BrowserNavigator).getBattery!();
     for (const ev of ['levelchange', 'chargingchange']) battery.addEventListener(ev, refresh);
     refresh();
   } catch { battery = null; }
@@ -45,7 +57,7 @@ export const tmuxBattery = {
     api.formatVar('battery_icon', () => {
       if (!battery) return '';
       if (battery.charging) return api.option('@batt_icon_status_charging', '⚡');
-      const p = pct();
+      const p = pct()!;
       if (p >= 95) return api.option('@batt_icon_charge_tier8', '█');
       if (p >= 65) return api.option('@batt_icon_charge_tier6', '▆');
       if (p >= 35) return api.option('@batt_icon_charge_tier4', '▄');
@@ -57,7 +69,7 @@ export const tmuxBattery = {
       return `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`;
     });
   },
-};
+} satisfies PluginEmulator;
 
 export const onlineStatus = {
   repo: 'tmux-plugins/tmux-online-status',
@@ -72,4 +84,4 @@ export const onlineStatus = {
       ? api.option('@offline_icon', 'offline')
       : api.option('@online_icon', 'online')));
   },
-};
+} satisfies PluginEmulator;
