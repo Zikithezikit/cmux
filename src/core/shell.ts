@@ -1,4 +1,3 @@
-// @ts-nocheck
 // A tiny POSIX-shell subset for `if-shell`, `run-shell` and `display-popup`.
 //
 // Real tmux hands these strings to /bin/sh. A browser has no shell, but the
@@ -14,14 +13,75 @@
 
 export class Unsupported extends Error {}
 
-const unsupported = (what) => { throw new Unsupported(what); };
+/** The result of running a command or script. */
+export interface ShellResult {
+  code: number;
+  out: string;
+  /** Set by `exit`: stop running the rest of the script. */
+  exit?: boolean;
+  err?: string;
+}
+
+/** What the shell needs from its embedder. */
+export interface ShellHost {
+  env?: Record<string, string>;
+  tmux(argv: string[]): Promise<ShellResult>;
+  platform?: string;
+  version?: string;
+  note?: (msg: string) => void;
+}
+
+type LitPart = { t: 'lit'; v: string; quoted: boolean };
+type CmdPart = { t: 'cmd'; src: string; quoted: boolean };
+type VarPart = { t: 'var'; name: string; quoted: boolean; len?: boolean; op?: string; word?: string };
+type Part = LitPart | CmdPart | VarPart;
+type Word = Part[];
+
+interface Redir {
+  redir: string;
+  fd: number;
+  target: string;
+}
+
+interface Token {
+  word?: Word;
+  op?: string;
+  redir?: string;
+  fd?: number;
+  target?: string;
+}
+
+interface SimpleCommand {
+  words: Word[];
+  redirs: Redir[];
+}
+
+interface Pipeline {
+  neg: boolean;
+  cmds: SimpleCommand[];
+}
+
+interface ListItem extends Pipeline {
+  op: string;
+}
+
+type CutRange = [number, number];
+
+interface TestOptions {
+  glob?: boolean;
+  note?: (msg: string) => void;
+}
+
+type Builtin = (a: string[], input: string, sh: Shell) => ShellResult;
+
+const unsupported: (what: string) => never = (what) => { throw new Unsupported(what); };
 
 // ----------------------------------------------------------------- lexer
 
 const OPS = ['&&', '||', ';', '|', '&', '\n'];
 
 /** Find the index just past the `)` closing a `$(` that starts at `i` (pointing after `$(`). */
-function matchParen(src, i) {
+function matchParen(src: string, i: number): number {
   let depth = 1;
   for (; i < src.length; i++) {
     const c = src[i];
@@ -38,7 +98,7 @@ function matchParen(src, i) {
 }
 
 /** Parse `$...` at src[i] (src[i] === '$'). Returns [part, nextIndex]. */
-function dollar(src, i, quoted) {
+function dollar(src: string, i: number, quoted: boolean): [Part, number] {
   const nx = src[i + 1];
   if (nx === '(') {
     if (src[i + 2] === '(') unsupported('$(( arithmetic ))');
@@ -49,7 +109,7 @@ function dollar(src, i, quoted) {
     const end = src.indexOf('}', i + 2);
     if (end === -1) unsupported('unterminated ${');
     const body = src.slice(i + 2, end);
-    let m;
+    let m: RegExpExecArray | null;
     if ((m = /^#([A-Za-z_]\w*)$/.exec(body))) return [{ t: 'var', name: m[1], len: true, quoted }, end + 1];
     if ((m = /^([A-Za-z_]\w*|[0-9@*#?$!])(?:(:?[-=+])(.*))?$/s.exec(body))) {
       return [{ t: 'var', name: m[1], op: m[2], word: m[3], quoted }, end + 1];
@@ -65,10 +125,10 @@ function dollar(src, i, quoted) {
  * Tokenise into words (arrays of parts) and operator strings.
  * Redirections become { redir: '>', fd, target } tokens.
  */
-function lex(src) {
-  const toks = [];
-  let word = null;
-  const part = (p) => { (word ||= []).push(p); };
+function lex(src: string): Token[] {
+  const toks: Token[] = [];
+  let word = null as Word | null;
+  const part = (p: Part) => { (word ||= []).push(p); };
   const flush = () => { if (word) { toks.push({ word }); word = null; } };
   let i = 0;
   while (i < src.length) {
@@ -145,16 +205,16 @@ function lex(src) {
 // ---------------------------------------------------------------- parser
 
 /** -> [{ neg, cmds: [{ words, redirs }], op }] where op joins to the next item. */
-function parse(src) {
+function parse(src: string): ListItem[] {
   const toks = lex(src);
-  const list = [];
-  let pipeline = { neg: false, cmds: [] };
-  let cmd = { words: [], redirs: [] };
+  const list: ListItem[] = [];
+  let pipeline: Pipeline = { neg: false, cmds: [] };
+  let cmd: SimpleCommand = { words: [], redirs: [] };
   const endCmd = () => {
     if (cmd.words.length || cmd.redirs.length) pipeline.cmds.push(cmd);
     cmd = { words: [], redirs: [] };
   };
-  const endPipeline = (op) => {
+  const endPipeline = (op: string) => {
     endCmd();
     if (pipeline.cmds.length) list.push({ ...pipeline, op });
     else if (op === '&&' || op === '||' || pipeline.neg) unsupported('syntax error');
@@ -163,8 +223,8 @@ function parse(src) {
   for (const tk of toks) {
     if (tk.op === '|') { endCmd(); continue; }
     if (tk.op) { endPipeline(tk.op === '&' ? ';' : tk.op); continue; }
-    if (tk.redir) { cmd.redirs.push(tk); continue; }
-    const w = tk.word;
+    if (tk.redir) { cmd.redirs.push(tk as Redir); continue; }
+    const w = tk.word!;
     if (!cmd.words.length && !pipeline.cmds.length && w.length === 1 && w[0].t === 'lit' && !w[0].quoted) {
       if (w[0].v === '!') { pipeline.neg = !pipeline.neg; continue; }
       if (['if', 'then', 'else', 'elif', 'fi', 'for', 'while', 'until', 'do', 'done', 'case', 'esac', 'function'].includes(w[0].v)) {
@@ -179,7 +239,7 @@ function parse(src) {
 
 // ------------------------------------------------------------- utilities
 
-function breToJs(pat, extended) {
+function breToJs(pat: string, extended: boolean): string {
   if (extended) return pat;
   // Basic regular expressions: \( \) \{ \} \| \+ \? are special, bare ones literal.
   let out = '';
@@ -194,11 +254,11 @@ function breToJs(pat, extended) {
   return out;
 }
 
-const lines = (s) => { const l = s.split('\n'); if (l[l.length - 1] === '') l.pop(); return l; };
-const out = (s, code = 0) => ({ code, out: s });
+const lines = (s: string): string[] => { const l = s.split('\n'); if (l[l.length - 1] === '') l.pop(); return l; };
+const out = (s: string, code = 0): ShellResult => ({ code, out: s });
 
-function parseCutList(spec) {
-  return String(spec).split(',').map((r) => {
+function parseCutList(spec: string): CutRange[] {
+  return String(spec).split(',').map((r): CutRange => {
     const m = /^(\d*)(-?)(\d*)$/.exec(r);
     if (!m) unsupported('cut list ' + spec);
     const a = m[1] ? Number(m[1]) : 1;
@@ -207,9 +267,9 @@ function parseCutList(spec) {
   });
 }
 
-const inList = (ranges, n) => ranges.some(([a, b]) => n >= a && n <= b);
+const inList = (ranges: CutRange[], n: number): boolean => ranges.some(([a, b]) => n >= a && n <= b);
 
-function trSet(s) {
+function trSet(s: string): string {
   let r = '';
   s = s.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\[:space:\]/g, ' \t\n').replace(/\[:digit:\]/g, '0-9')
     .replace(/\[:upper:\]/g, 'A-Z').replace(/\[:lower:\]/g, 'a-z').replace(/\[:alpha:\]/g, 'a-zA-Z');
@@ -222,22 +282,22 @@ function trSet(s) {
   return r;
 }
 
-function bcEval(expr) {
+function bcEval(expr: string): string {
   const e = expr.trim();
   if (!e) return '';
   const m = /^(-?[\d.]+)\s*(==|!=|<=|>=|<|>|\+|-|\*|\/|%)\s*(-?[\d.]+)$/.exec(e);
   if (!m) { if (/^-?[\d.]+$/.test(e)) return String(Number(e)); unsupported('bc expression ' + e); }
   const a = Number(m[1]), b = Number(m[3]);
-  const r = { '==': +(a === b), '!=': +(a !== b), '<=': +(a <= b), '>=': +(a >= b), '<': +(a < b), '>': +(a > b),
-    '+': a + b, '-': a - b, '*': a * b, '/': b ? Math.trunc(a / b) : 0, '%': b ? a % b : 0 }[m[2]];
+  const r = ({ '==': +(a === b), '!=': +(a !== b), '<=': +(a <= b), '>=': +(a >= b), '<': +(a < b), '>': +(a > b),
+    '+': a + b, '-': a - b, '*': a * b, '/': b ? Math.trunc(a / b) : 0, '%': b ? a % b : 0 } as Record<string, number>)[m[2]];
   return String(r);
 }
 
 /** `test` / `[` evaluation. Returns an exit code. File tests can't be answered: they're false. */
-function testExpr(args, sh) {
-  const num = (s) => { if (!/^\s*-?\d+\s*$/.test(s)) throw new Error(`integer expression expected: ${s}`); return Number(s); };
+function testExpr(args: string[], sh: TestOptions): number {
+  const num = (s: string): number => { if (!/^\s*-?\d+\s*$/.test(s)) throw new Error(`integer expression expected: ${s}`); return Number(s); };
   let i = 0;
-  const primary = () => {
+  const primary = (): boolean => {
     const a = args[i];
     if (a === '!') { i++; return !primary(); }
     if (a === '(') { i++; const v = orExpr(); i++; return v; }
@@ -271,13 +331,13 @@ function testExpr(args, sh) {
     i++;
     return a !== undefined && a !== '';
   };
-  const andExpr = () => { let v = primary(); while (args[i] === '-a' || args[i] === '&&') { i++; const r = primary(); v = v && r; } return v; };
-  const orExpr = () => { let v = andExpr(); while (args[i] === '-o' || args[i] === '||') { i++; const r = andExpr(); v = v || r; } return v; };
+  const andExpr = (): boolean => { let v = primary(); while (args[i] === '-a' || args[i] === '&&') { i++; const r = primary(); v = v && r; } return v; };
+  const orExpr = (): boolean => { let v = andExpr(); while (args[i] === '-o' || args[i] === '||') { i++; const r = andExpr(); v = v || r; } return v; };
   if (!args.length) return 1;
   try { return orExpr() ? 0 : 1; } catch { return 2; }
 }
 
-function globMatch(glob, s) {
+function globMatch(glob: string, s: string): boolean {
   let re = '';
   for (const ch of glob) re += ch === '*' ? '.*' : ch === '?' ? '.' : ch.replace(/[.+^${}()|[\]\\]/g, '\\$&');
   return new RegExp('^' + re + '$').test(s);
@@ -288,7 +348,7 @@ function globMatch(glob, s) {
 const KNOWN = new Set(['tmux', 'echo', 'printf', 'test', '[', '[[', 'true', 'false', ':', 'uname', 'cut', 'grep', 'egrep',
   'sed', 'tr', 'awk', 'bc', 'head', 'tail', 'cat', 'command', 'which', 'type', 'exit', 'sh', 'bash', 'cd', 'wc', 'sort', 'export']);
 
-const BUILTINS = {
+const BUILTINS: Record<string, Builtin> = {
   true: () => out(''),
   ':': () => out(''),
   false: () => out('', 1),
@@ -300,7 +360,7 @@ const BUILTINS = {
   },
   echo: (a) => {
     let nl = true, esc = false;
-    while (a[0] && /^-[neE]+$/.test(a[0])) { const f = a.shift(); if (f.includes('n')) nl = false; if (f.includes('e')) esc = true; }
+    while (a[0] && /^-[neE]+$/.test(a[0])) { const f = a.shift()!; if (f.includes('n')) nl = false; if (f.includes('e')) esc = true; }
     let s = a.join(' ');
     if (esc) s = s.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\\\/g, '\\');
     return out(s + (nl ? '\n' : ''));
@@ -308,11 +368,11 @@ const BUILTINS = {
   printf: (a) => {
     const fmt = (a.shift() ?? '').replace(/\\n/g, '\n').replace(/\\t/g, '\t');
     let k = 0;
-    return out(fmt.replace(/%([-0-9.]*)([sdf%])/g, (all, w, c) => {
+    return out(fmt.replace(/%([-0-9.]*)([sdf%])/g, (all: string, w: string, c: string) => {
       if (c === '%') return '%';
       const v = a[k++] ?? '';
       if (c === 'd') return String(Math.trunc(Number(v) || 0));
-      if (c === 'f') return (Number(v) || 0).toFixed(/\.(\d+)/.exec(w)?.[1] ? Number(/\.(\d+)/.exec(w)[1]) : 6);
+      if (c === 'f') return (Number(v) || 0).toFixed(/\.(\d+)/.exec(w)?.[1] ? Number(/\.(\d+)/.exec(w)![1]) : 6);
       return v;
     }));
   },
@@ -358,9 +418,9 @@ const BUILTINS = {
     return out(l.map((x) => x + '\n').join(''));
   },
   cut: (a, input) => {
-    let delim = '\t', fields = null, chars = null;
+    let delim = '\t', fields = null as CutRange[] | null, chars = null as CutRange[] | null;
     for (let i = 0; i < a.length; i++) {
-      let m;
+      let m: RegExpExecArray | null;
       if (a[i] === '-d') delim = a[++i];
       else if ((m = /^-d(.+)$/s.exec(a[i]))) delim = m[1];
       else if (a[i] === '-f') fields = parseCutList(a[++i]);
@@ -378,7 +438,7 @@ const BUILTINS = {
   },
   grep: (a, input) => {
     let quiet = false, ci = false, ext = false, inv = false, only = false, fixed = false, count = false;
-    const pats = [];
+    const pats: string[] = [];
     for (let i = 0; i < a.length; i++) {
       const x = a[i];
       if (x === '-e') { pats.push(a[++i]); continue; }
@@ -402,7 +462,7 @@ const BUILTINS = {
     if (!pats.length) return out('', 2);
     if (pats.length > 1 && !a.includes('-e')) unsupported('grep file');
     const res = pats.map((p) => new RegExp(fixed ? p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : breToJs(p, ext), ci ? 'i' : ''));
-    const hits = [];
+    const hits: string[] = [];
     for (const l of lines(input)) {
       const m = res.map((r) => r.exec(l)).find(Boolean);
       if (!!m !== inv) hits.push(only && m ? m[0] : l);
@@ -412,7 +472,7 @@ const BUILTINS = {
   },
   sed: (a, input) => {
     let ext = false, quiet = false;
-    const exprs = [];
+    const exprs: string[] = [];
     for (let i = 0; i < a.length; i++) {
       if (/^-[Ernu]+$/.test(a[i])) { if (/[Er]/.test(a[i])) ext = true; if (a[i].includes('n')) quiet = true; }
       else if (a[i] === '-e') exprs.push(a[++i]);
@@ -423,7 +483,7 @@ const BUILTINS = {
     const subs = exprs.flatMap((e) => e.split(/;\s*(?=s.)/)).map((e) => {
       const d = e[1];
       if (e[0] !== 's' || !d) unsupported('sed ' + e);
-      const parts = [];
+      const parts: string[] = [];
       let cur = '';
       for (let i = 2; i < e.length; i++) {
         if (e[i] === '\\' && e[i + 1] === d) { cur += d; i++; continue; }
@@ -439,7 +499,7 @@ const BUILTINS = {
         print: flags.includes('p'),
       };
     });
-    const res = [];
+    const res: string[] = [];
     for (let l of lines(input)) {
       let printed = false;
       for (const s of subs) {
@@ -457,17 +517,17 @@ const BUILTINS = {
     return out([...input].map((c) => { const k = from.indexOf(c); return k === -1 ? c : to[Math.min(k, to.length - 1)]; }).join(''));
   },
   awk: (a, input) => {
-    let sep = null;
-    const rest = [];
+    let sep = null as string | null;
+    const rest: string[] = [];
     for (let i = 0; i < a.length; i++) {
-      let m;
+      let m: RegExpExecArray | null;
       if (a[i] === '-F') sep = a[++i];
       else if ((m = /^-F(.+)$/.exec(a[i]))) sep = m[1];
       else rest.push(a[i]);
     }
     const m = /^\s*\{\s*print\s+((?:\$(?:\d+|NF)\s*,?\s*)+)\}\s*$/.exec(rest[0] || '');
     if (!m || rest.length > 1) unsupported('awk ' + (rest[0] || ''));
-    const cols = m[1].match(/\$(\d+|NF)/g).map((c) => c.slice(1));
+    const cols = m[1].match(/\$(\d+|NF)/g)!.map((c) => c.slice(1));
     return out(lines(input).map((l) => {
       const f = sep == null ? l.trim().split(/\s+/) : l.split(sep);
       return cols.map((c) => (c === 'NF' ? f[f.length - 1] : c === '0' ? l : f[Number(c) - 1] ?? '')).join(' ') + '\n';
@@ -480,10 +540,17 @@ BUILTINS.egrep = (a, input, sh) => BUILTINS.grep(['-E', ...a], input, sh);
 // --------------------------------------------------------------- execution
 
 export class Shell {
+  declare host: ShellHost;
+  declare env: Record<string, string>;
+  declare platform: string;
+  declare note: ((msg: string) => void) | undefined;
+  declare depth: number;
+  declare lastCode?: number;
+
   /**
    * host: { env: object, tmux: async (argv) => { code, out }, platform, version, note }
    */
-  constructor(host) {
+  constructor(host: ShellHost) {
     this.host = host;
     this.env = { ...host.env };
     this.platform = host.platform || 'Linux';
@@ -491,13 +558,13 @@ export class Shell {
     this.depth = 0;
   }
 
-  async expandWord(word) {
+  async expandWord(word: Word): Promise<string[]> {
     // -> array of fields
-    const fields = [];
-    let cur = null;
-    const add = (s) => { cur = (cur ?? '') + s; };
+    const fields: string[] = [];
+    let cur = null as string | null;
+    const add = (s: string) => { cur = (cur ?? '') + s; };
     for (const p of word) {
-      let v;
+      let v: string;
       if (p.t === 'lit') {
         if (p.quoted) { add(p.v); continue; }
         add(p.v);
@@ -516,21 +583,21 @@ export class Shell {
     return fields;
   }
 
-  varValue(p) {
+  varValue(p: VarPart): string {
     const has = Object.prototype.hasOwnProperty.call(this.env, p.name);
     const val = has ? String(this.env[p.name]) : p.name === '?' ? String(this.lastCode ?? 0) : '';
     if (p.len) return String(val.length);
     if (!p.op) return val;
     const unsetOrNull = p.op.startsWith(':') ? val === '' : !has;
     const op = p.op.replace(':', '');
-    if (op === '-') return unsetOrNull ? p.word : val;
-    if (op === '=') { if (unsetOrNull) this.env[p.name] = p.word; return unsetOrNull ? p.word : val; }
-    if (op === '+') return unsetOrNull ? '' : p.word;
+    if (op === '-') return unsetOrNull ? p.word! : val;
+    if (op === '=') { if (unsetOrNull) this.env[p.name] = p.word!; return unsetOrNull ? p.word! : val; }
+    if (op === '+') return unsetOrNull ? '' : p.word!;
     return val;
   }
 
   /** Run a script. Returns { code, out }. Throws Unsupported. */
-  async run(src) {
+  async run(src: string): Promise<ShellResult> {
     if (++this.depth > 8) unsupported('nesting too deep');
     try {
       const list = parse(String(src));
@@ -553,9 +620,9 @@ export class Shell {
     }
   }
 
-  async pipeline({ neg, cmds }) {
+  async pipeline({ neg, cmds }: Pipeline): Promise<ShellResult> {
     let input = '';
-    let r = { code: 0, out: '' };
+    let r: ShellResult = { code: 0, out: '' };
     for (const c of cmds) {
       r = await this.simple(c, input);
       input = r.out;
@@ -564,12 +631,12 @@ export class Shell {
     return { code: neg ? (r.code === 0 ? 1 : 0) : r.code, out: r.out, exit: r.exit };
   }
 
-  async simple({ words, redirs }, input) {
-    const argv = [];
+  async simple({ words, redirs }: SimpleCommand, input: string): Promise<ShellResult> {
+    const argv: string[] = [];
     for (const w of words) argv.push(...(await this.expandWord(w)));
     // Leading NAME=value assignments.
-    const assigns = [];
-    while (argv.length && /^[A-Za-z_]\w*=/.test(argv[0])) assigns.push(argv.shift());
+    const assigns: string[] = [];
+    while (argv.length && /^[A-Za-z_]\w*=/.test(argv[0])) assigns.push(argv.shift()!);
     if (!argv.length) {
       for (const a of assigns) { const k = a.indexOf('='); this.env[a.slice(0, k)] = a.slice(k + 1); }
       return out('');
@@ -586,7 +653,7 @@ export class Shell {
       unsupported('redirection to ' + t);
     }
     const [name, ...args] = argv;
-    let res;
+    let res: ShellResult;
     if (name === 'tmux') res = await this.tmux(args);
     else if (name === 'sh' || name === 'bash') {
       if (args[0] !== '-c') unsupported(`${name} script`);
@@ -596,11 +663,11 @@ export class Shell {
     return dropOut ? { ...res, out: '' } : res;
   }
 
-  async tmux(args) {
+  async tmux(args: string[]): Promise<ShellResult> {
     // Global flags: -2 -u -v -C -l -N, -L name, -S path, -f file, -T features.
     const a = args.slice();
     while (a.length && /^-[2uvClN]+$|^-[LSfT]/.test(a[0])) {
-      const f = a.shift();
+      const f = a.shift()!;
       if (/^-[LSfT]$/.test(f)) a.shift();
     }
     if (a[0] === '-V') return out(`tmux ${this.host.version || '3.4'}\n`);
@@ -610,6 +677,6 @@ export class Shell {
 }
 
 /** Convenience wrapper: run `src` with `host`. Returns { code, out } or throws Unsupported. */
-export async function runShell(src, host) {
+export async function runShell(src: string, host: ShellHost): Promise<ShellResult> {
   return new Shell(host).run(src);
 }
